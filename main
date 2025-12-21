@@ -61,8 +61,7 @@ main_buttons = [
     [Button.text("✅ Гаранты базы", resize=True), Button.text("👨‍🎓 Волонтёры базы", resize=True)],
     [Button.text("🔰 Проверенные пользователи", resize=True), Button.text("📊 Статистика базы", resize=True)],
     [Button.text("🔓 Премиум", resize=True), Button.text("❓ Частые вопросы", resize=True)],
-    [Button.text("🚫 Слить скаммера!", resize=True)],
-    [Button.text("🔗 Проверить ссылку", resize=True)]
+    [Button.text("🚫 Слить скаммера!", resize=True)]
 ]
 
 # Настройки логирования
@@ -402,8 +401,11 @@ class Database:
         )
         result = self.cursor.fetchone()
         if result:
-            expiry_date = datetime.strptime(result['expiry_date'], "%Y-%m-%d %H:%M:%S")
-            return expiry_date > datetime.now()
+            try:
+                expiry_date = datetime.strptime(result['expiry_date'], "%Y-%m-%d %H:%M:%S")
+                return expiry_date > datetime.now()
+            except:
+                return False
         return False
 
     def get_premium_expiry(self, user_id):
@@ -1039,7 +1041,7 @@ async def start(event):
         """🍀 | 🎮 Меню бота, используйте кнопки ниже для навигации.
 
 🌿 | Для проверки Пропишите:
-<pre>чек @XOMTG</pre>""",
+<pre>чек @username</pre>""",
         buttons=main_buttons,
         parse_mode='html'
     )
@@ -1689,7 +1691,7 @@ async def premium_info(event):
     
     loading_message = await send_response(event, "🔄 Загрузка информации о премиуме...")
     
-    text = f"""Откройте уникальные возможности: [ ](https://i.ibb.co/wZ61gwPk/IMG-20251216-230901-226.jpg)
+    text = f"""Откройте уникальные возможности: [ ](https://i.ibb.co/bMbQc9c0/photo-2025-06-01-12-01-48.jpg)
 
 • Установить себе кастомное фото
 • Поставить ссылку на свой канал
@@ -1698,7 +1700,7 @@ async def premium_info(event):
 """
     
     buttons = [
-        [Button.url("💰 Оплата", "https://t.me/XOMTG")],
+        [Button.url("💰 Оплата", "https://t.me/Werovers")],
         [Button.inline("↩ Скрыть", b"hide_message")]
     ]
     
@@ -2366,6 +2368,214 @@ async def unban_handler(event):
         await send_response(event, f"❌ **Ошибка:** {message}")
 
 
+# ========== КОМАНДЫ ДЛЯ ПРЕМИУМА ==========
+
+@bot.on(events.NewMessage(pattern=r'(?i)^\+премиум\s+(\d+)\s*(день|дня|дней|д|суток|сутки|сут)\s*(.*)'))
+async def grant_premium_command(event):
+    """Выдача премиума с указанием времени"""
+    sender = await event.get_sender()
+    sender_role = db.get_user_role(sender.id)
+    
+    # Проверка прав (только админы и выше)
+    if sender_role not in [7, 8, 9, 10, 11] and sender.id not in OWNER_ID:
+        return await send_response(event, "❌ У вас нет прав для выдачи премиума")
+    
+    args = event.raw_text.split(maxsplit=3)
+    
+    if len(args) < 3:
+        return await send_response(
+            event,
+            "❌ Использование: +премиум количество_дней @username причина\n"
+            "Пример: +премиум 30 @username За активность"
+        )
+    
+    try:
+        days = int(args[1])
+        if days <= 0:
+            return await send_response(event, "❌ Количество дней должно быть положительным числом")
+    except:
+        return await send_response(event, "❌ Неверное количество дней")
+    
+    # Получаем целевого пользователя
+    target_user = None
+    reason = args[3] if len(args) > 3 else "Не указана"
+    
+    if event.is_reply:
+        replied = await event.get_reply_message()
+        target_user = await event.client.get_entity(replied.sender_id)
+    else:
+        if len(args) < 3:
+            return await send_response(event, "❌ Укажите пользователя или ответьте на сообщение")
+        
+        target_arg = args[2]
+        try:
+            if target_arg.isdigit():
+                target_user = await event.client.get_entity(int(target_arg))
+            elif target_arg.startswith('@'):
+                target_user = await event.client.get_entity(target_arg[1:])
+            else:
+                return await send_response(event, "❌ Неверный формат имени пользователя")
+        except:
+            return await send_response(event, "❌ Не удалось найти пользователя")
+    
+    if not target_user:
+        return await send_response(event, "❌ Не указан пользователь")
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(target_user.id):
+        db.add_user(target_user.id, target_user.username)
+    
+    # Рассчитываем дату окончания
+    expiry_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Выдаем премиум
+    db.add_premium(target_user.id, expiry_date)
+    
+    # Форматируем дни
+    day_word = "день"
+    if days % 10 == 1 and days % 100 != 11:
+        day_word = "день"
+    elif 2 <= days % 10 <= 4 and (days % 100 < 10 or days % 100 >= 20):
+        day_word = "дня"
+    else:
+        day_word = "дней"
+    
+    response_text = (
+        f"**✅ Премиум успешно выдан!**\n\n"
+        f"**👤 Пользователь:** [{target_user.first_name}](tg://user/{target_user.id})\n"
+        f"**👮 Выдал:** [{sender.first_name}](tg://user/{sender.id})\n"
+        f"**⏳ Срок:** {days} {day_word}\n"
+        f"**📅 Истекает:** {expiry_date[:16]}\n"
+        f"**📝 Причина:** {reason}"
+    )
+    
+    await send_response(event, response_text, link_preview=True)
+    
+    # Отправляем уведомление пользователю
+    try:
+        await bot.send_message(
+            target_user.id,
+            f"**🎉 Вам выдан WARD Premium!**\n\n"
+            f"**👮 Выдал:** [{sender.first_name}](tg://user/{sender.id})\n"
+            f"**⏳ Срок:** {days} {day_word}\n"
+            f"**📅 Истекает:** {expiry_date[:16]}\n"
+            f"**📝 Причина:** {reason}\n\n"
+            f"Теперь вам доступны эксклюзивные функции бота! 🚀"
+        )
+    except:
+        pass  # Не удалось отправить сообщение
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^\-премиум(?:\s+(?:@?\w+|\d+))?'))
+async def remove_premium_command(event):
+    """Снятие премиум статуса"""
+    sender = await event.get_sender()
+    sender_role = db.get_user_role(sender.id)
+    
+    # Проверка прав
+    if sender_role not in [7, 8, 9, 10, 11] and sender.id not in OWNER_ID:
+        return await send_response(event, "❌ У вас нет прав для снятия премиума")
+    
+    # Получаем целевого пользователя
+    target_user = None
+    
+    if event.is_reply:
+        replied = await event.get_reply_message()
+        target_user = await event.client.get_entity(replied.sender_id)
+    else:
+        args = event.raw_text.split()
+        if len(args) > 1:
+            target_arg = args[1]
+            try:
+                if target_arg.isdigit():
+                    target_user = await event.client.get_entity(int(target_arg))
+                elif target_arg.startswith('@'):
+                    target_user = await event.client.get_entity(target_arg[1:])
+            except:
+                return await send_response(event, "❌ Не удалось найти пользователя")
+        else:
+            return await send_response(
+                event,
+                "❌ Использование:\n"
+                "• `-премиум @username`\n"
+                "• `-премиум` (ответом на сообщение)"
+            )
+    
+    if not target_user:
+        return await send_response(event, "❌ Не указан пользователь")
+    
+    # Проверяем, есть ли премиум
+    if not db.is_premium_user(target_user.id):
+        return await send_response(
+            event,
+            f"**ℹ️ У пользователя [{target_user.first_name}](tg://user/{target_user.id}) нет премиум статуса.**"
+        )
+    
+    # Снимаем премиум
+    db.remove_premium(target_user.id)
+    
+    await send_response(
+        event,
+        f"**✅ Премиум статус снят!**\n\n"
+        f"**👤 Пользователь:** [{target_user.first_name}](tg://user/{target_user.id})\n"
+        f"**👮 Снял:** [{sender.first_name}](tg://user/{sender.id})\n"
+        f"**🕒 Время:** {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    )
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^/премиумстатус|/premiumstatus'))
+async def check_premium_status(event):
+    """Проверка премиум статуса пользователя"""
+    sender = await event.get_sender()
+    
+    # Получаем целевого пользователя
+    target_user = None
+    
+    if event.is_reply:
+        replied = await event.get_reply_message()
+        target_user = await event.client.get_entity(replied.sender_id)
+    else:
+        args = event.raw_text.split()
+        if len(args) > 1:
+            target_arg = args[1]
+            try:
+                if target_arg.isdigit():
+                    target_user = await event.client.get_entity(int(target_arg))
+                elif target_arg.startswith('@'):
+                    target_user = await event.client.get_entity(target_arg[1:])
+            except:
+                return await send_response(event, "❌ Не удалось найти пользователя")
+        else:
+            target_user = sender
+    
+    if not target_user:
+        target_user = sender
+    
+    # Проверяем премиум статус
+    is_premium = db.is_premium_user(target_user.id)
+    expiry_date = db.get_premium_expiry(target_user.id)
+    
+    if is_premium and expiry_date:
+        try:
+            expiry_datetime = datetime.strptime(expiry_date, "%Y-%m-%d %H:%M:%S")
+            remaining = expiry_datetime - datetime.now()
+            days_remaining = remaining.days
+            hours_remaining = remaining.seconds // 3600
+            
+            response = (
+                f"**🎉 {target_user.first_name} имеет WARD Premium!**\n\n"
+                f"**📅 Окончание:** {expiry_date[:10]}\n"
+                f"**⏳ Осталось:** {days_remaining} дней {hours_remaining} часов\n"
+                f"**👤 ID:** `{target_user.id}`"
+            )
+        except:
+            response = f"**ℹ️ {target_user.first_name} имеет премиум статус (до {expiry_date[:10]})**"
+    else:
+        response = f"**ℹ️ У {target_user.first_name} нет WARD Premium**"
+    
+    await send_response(event, response)
+
+
 # ========== ОБРАБОТЧИКИ CALLBACK ==========
 
 @bot.on(events.CallbackQuery(data=b"hide_message"))
@@ -2377,33 +2587,64 @@ async def hide_message_handler(event):
         pass
 
 
-@bot.on(events.CallbackQuery(pattern=r'mark_(scammer|possible|suspect|rooster)_(\d+)_(.+)'))
+@bot.on(events.CallbackQuery(pattern=rb'mark_(scammer|possible|suspect|rooster)_(\d+)_(.+)'))
 async def mark_user_handler(event):
-    """Обработчик выбора роли для скаммера"""
-    role_type = event.pattern_match.group(1)
-    user_id = int(event.pattern_match.group(2))
-    
-    role_mapping = {
-        'scammer': 3,
-        'possible': 2,
-        'suspect': 5,
-        'rooster': 4
-    }
-    
-    # Проверка прав
-    user_role = db.get_user_role(event.sender_id)
-    if user_role not in [1, 6, 8, 10, 11, 9] and event.sender_id not in OWNER_ID:
-        return await event.answer("⛔ У вас нет прав!", alert=True)
-    
-    # Обновление роли
-    db.update_role(user_id, role_mapping[role_type])
-    
-    # Увеличиваем счетчик скаммеров для того, кто отметил
-    db.increment_scammers_count(event.sender_id)
-    scammers_slept = db.get_user_scammers_slept(event.sender_id)
-    
-    await event.answer(f"✅ Роль установлена! Скаммеров слито: {scammers_slept}", alert=True)
-    await event.delete()
+    """Обработчик выбора роли для скаммера - ИСПРАВЛЕННЫЙ ВАРИАНТ"""
+    try:
+        # Декодируем данные callback
+        data_bytes = event.data
+        data_str = data_bytes.decode('utf-8')
+        
+        # Разбиваем на части
+        parts = data_str.split('_')
+        
+        if len(parts) < 4:
+            logger.error(f"Некорректный формат callback данных: {data_str}")
+            return await event.answer("❌ Ошибка формата данных", alert=True)
+        
+        # Извлекаем данные
+        role_type = parts[1]  # scammer, possible, suspect, rooster
+        user_id = int(parts[2])
+        unique_id = '_'.join(parts[3:])  # Остальная часть - уникальный ID
+        
+        # Маппинг ролей
+        role_mapping = {
+            'scammer': 3,
+            'possible': 2,
+            'suspect': 5,
+            'rooster': 4
+        }
+        
+        # Проверка прав
+        user_role = db.get_user_role(event.sender_id)
+        if user_role not in [1, 6, 8, 10, 11, 9] and event.sender_id not in OWNER_ID:
+            return await event.answer("⛔ У вас нет прав!", alert=True)
+        
+        # Проверяем, существует ли такая роль
+        if role_type not in role_mapping:
+            logger.error(f"Неизвестный тип роли: {role_type}")
+            return await event.answer("❌ Неизвестный тип роли", alert=True)
+        
+        # Обновление роли
+        db.update_role(user_id, role_mapping[role_type])
+        
+        # Увеличиваем счетчик скаммеров для того, кто отметил
+        db.increment_scammers_count(event.sender_id)
+        scammers_slept = db.get_user_scammers_slept(event.sender_id)
+        
+        await event.answer(f"✅ Роль установлена! Скаммеров слито: {scammers_slept}", alert=True)
+        
+        # Получаем информацию о пользователе для сообщения
+        try:
+            user = await bot.get_entity(user_id)
+            role_name = ROLES[role_mapping[role_type]]['name']
+            await event.edit(f"✅ Пользователю [{user.first_name}](tg://user?id={user_id}) установлена роль: {role_name}")
+        except:
+            await event.edit(f"✅ Роль {role_name} установлена пользователю ID: {user_id}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка в обработчике mark_user_handler: {e}")
+        await event.answer("❌ Произошла ошибка при обработке", alert=True)
 
 
 @bot.on(events.CallbackQuery(pattern='about_project'))
@@ -2431,13 +2672,13 @@ async def support_handler(event):
     support_text = (
         "Если вы хотите поддержать развитие бота, "
         "вы можете сделать это следующими способами:\n\n"
-        "TTD ник: **RYWUEEHWI**"
+        "TTD ник: **pisun11000**"
         "[⠀](https://i.ibb.co/0x7KTr0/image.jpg)"
     )
     
     buttons = [
         [Button.url("💌 Крипто ботом", "https://t.me/send?start=IVdGVHgwlEsa")],
-        [Button.url("💞 Наш кодер", "https://t.me/XOMTG")]
+        [Button.url("💞 Наш кодер", "https://t.me/tgrayan")]
     ]
     
     await event.edit(support_text, buttons=buttons, link_preview=True)
@@ -2446,7 +2687,19 @@ async def support_handler(event):
 @bot.on(events.CallbackQuery(pattern='creator'))
 async def creator_handler(event):
     """Информация о создателях"""
-    await event.edit("Информация о создателях:\nСоздатель - @XOMTG\nКодер - @XOMTG")
+    creator_text = (
+        "**👑 Создатели WARD ANTISCAM:**\n\n"
+        "**Создатель:** @half50k\n"
+        "**Кодер:** @tgrayan\n\n"
+        "💖 **Благодарим вас за использование нашего бота!**"
+    )
+    
+    buttons = [
+        [Button.url("📢 Наш канал", "https://t.me/WARDREPORT")],
+        [Button.inline("↩ Назад", "about_project")]
+    ]
+    
+    await event.edit(creator_text, buttons=buttons)
 
 
 @bot.on(events.CallbackQuery(pattern='add_group'))
@@ -2470,54 +2723,59 @@ async def report_handler(event):
 @bot.on(events.CallbackQuery(pattern=r'check_(\d+)'))
 async def check_callback_handler(event):
     """Обработчик проверки по callback"""
-    user_id = int(event.data.decode().split('_')[1])
     try:
+        user_id = int(event.data.decode().split('_')[1])
         user = await bot.get_entity(user_id)
         user_data = db.get_user(user_id)
         message_text, buttons = await get_user_profile_response(event, user, user_data)
         await event.respond(message_text, buttons=buttons, link_preview=True)
-    except:
+    except Exception as e:
+        logger.error(f"Ошибка в check_callback_handler: {e}")
         await event.answer("❌ Не удалось получить информацию о пользователе", alert=True)
 
 
 @bot.on(events.CallbackQuery(pattern='check_soon'))
 async def check_soon_handler(event):
     """Проверить себя через callback"""
-    user = await event.client.get_entity(event.sender_id)
-    user_id = user.id
-    
-    # Получаем данные пользователя
-    user_data = db.get_user(user_id)
-    role_id = db.get_user_role(user_id)
-    role_info = ROLES[role_id]
-    
-    checks_count = db.get_check_count(user_id)
-    current_time = datetime.now()
-    
-    custom_photo = db.get_user_custom_photo(user_id)
-    preview_url = custom_photo if custom_photo else role_info['preview_url']
-    
-    response = (
-        f"👤 | Пользователь: [{user.first_name}](tg://user/{user.id})\n\n"
-        f"🔍 | ID: `{user.id}`\n\n"
-        f"🤗 | Роль в базе: {role_info['name']}\n\n"
-        f"⚖ | Шанс скама: {role_info['scam_chance']}%\n\n"
-        f"📅 {current_time.strftime('%d.%m.%Y')} | 🔍 {checks_count}\n\n"
-        f"[Просмотреть медиа]({preview_url})"
-    )
-    
-    buttons = [
-        [
-            Button.url("👤 Профиль", f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"),
-            Button.url("🔗 Ссылка", f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}")
-        ],
-        [
-            Button.url("⚠️ Слить скаммера", "https://t.me/WARDREPORT"),
-            Button.inline("⚖️ Аппеляция", "appeal")
+    try:
+        user = await event.client.get_entity(event.sender_id)
+        user_id = user.id
+        
+        # Получаем данные пользователя
+        user_data = db.get_user(user_id)
+        role_id = db.get_user_role(user_id)
+        role_info = ROLES[role_id]
+        
+        checks_count = db.get_check_count(user_id)
+        current_time = datetime.now()
+        
+        custom_photo = db.get_user_custom_photo(user_id)
+        preview_url = custom_photo if custom_photo else role_info['preview_url']
+        
+        response = (
+            f"👤 | Пользователь: [{user.first_name}](tg://user/{user.id})\n\n"
+            f"🔍 | ID: `{user.id}`\n\n"
+            f"🤗 | Роль в базе: {role_info['name']}\n\n"
+            f"⚖ | Шанс скама: {role_info['scam_chance']}%\n\n"
+            f"📅 {current_time.strftime('%d.%m.%Y')} | 🔍 {checks_count}\n\n"
+            f"[Просмотреть медиа]({preview_url})"
+        )
+        
+        buttons = [
+            [
+                Button.url("👤 Профиль", f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"),
+                Button.url("🔗 Ссылка", f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}")
+            ],
+            [
+                Button.url("⚠️ Слить скаммера", "https://t.me/WARDREPORT"),
+                Button.inline("⚖️ Аппеляция", "appeal")
+            ]
         ]
-    ]
-    
-    await event.edit(response, buttons=buttons)
+        
+        await event.edit(response, buttons=buttons)
+    except Exception as e:
+        logger.error(f"Ошибка в check_soon_handler: {e}")
+        await event.answer("❌ Произошла ошибка", alert=True)
 
 
 @bot.on(events.CallbackQuery(pattern='country_soon'))
@@ -2541,23 +2799,31 @@ async def country_soon_handler(event):
 @bot.on(events.CallbackQuery(pattern=r'set_country_(\d+)'))
 async def set_country_handler(event):
     """Установка страны"""
-    country_idx = int(event.data.decode().split('_')[2])
-    countries = [
-        "США 🇺🇸", "Канада 🇨🇦", "Мексика 🇲🇽", "Бразилия 🇧🇷",
-        "Аргентина 🇦🇷", "Великобритания 🇬🇧", "Франция 🇫🇷",
-        "Германия 🇩🇪", "Италия 🇮🇹", "Испания 🇪🇸", "Китай 🇨🇳",
-        "Япония 🇯🇵", "Австралия 🇦🇺", "Индия 🇮🇳", "Россия 🇷🇺"
-    ]
-    
-    country = countries[country_idx]
-    user_id = event.sender_id
-    
-    # Добавляем пользователя в БД если его нет
-    if not db.user_exists(user_id):
-        db.add_user(user_id, None)
-    
-    db.update_user(user_id, country=country)
-    await event.answer(f"✅ Страна установлена: {country}", alert=True)
+    try:
+        country_idx = int(event.data.decode().split('_')[2])
+        countries = [
+            "США 🇺🇸", "Канада 🇨🇦", "Мексика 🇲🇽", "Бразилия 🇧🇷",
+            "Аргентина 🇦🇷", "Великобритания 🇬🇧", "Франция 🇫🇷",
+            "Германия 🇩🇪", "Италия 🇮🇹", "Испания 🇪🇸", "Китай 🇨🇳",
+            "Япония 🇯🇵", "Австралия 🇦🇺", "Индия 🇮🇳", "Россия 🇷🇺"
+        ]
+        
+        if country_idx >= len(countries):
+            return await event.answer("❌ Неверный индекс страны", alert=True)
+        
+        country = countries[country_idx]
+        user_id = event.sender_id
+        
+        # Добавляем пользователя в БД если его нет
+        if not db.user_exists(user_id):
+            db.add_user(user_id, None)
+        
+        db.update_user(user_id, country=country)
+        await event.answer(f"✅ Страна установлена: {country}", alert=True)
+        await event.delete()
+    except Exception as e:
+        logger.error(f"Ошибка в set_country_handler: {e}")
+        await event.answer("❌ Произошла ошибка", alert=True)
 
 
 @bot.on(events.CallbackQuery(pattern='channel_soon'))
@@ -2661,44 +2927,55 @@ async def remove_custom_handler(event):
 @bot.on(events.CallbackQuery(pattern=r'buy_(premium|rest)_(\d+)([днм])'))
 async def purchase_handler(event):
     """Покупка в магазине"""
-    action = event.pattern_match.group(1)
-    amount = int(event.pattern_match.group(2))
-    unit = event.pattern_match.group(3)
-    
-    user_id = event.sender_id
-    balance = db.get_premium_points(user_id)
-    
-    cost_mapping = {
-        'premium_1д': 10,
-        'premium_7д': 50,
-        'premium_30д': 125,
-        'rest_1д': 100
-    }
-    
-    data_str = event.data.decode('utf-8')
-    cost = cost_mapping.get(data_str)
-    
-    if not cost:
-        return await event.answer("Неизвестная команда.", alert=True)
-    
-    if balance >= cost:
-        db.add_premium_points(user_id, -cost)
+    try:
+        data_str = event.data.decode('utf-8')
+        parts = data_str.split('_')
         
-        if action == 'premium':
-            if unit == 'д':
-                days = amount
-            elif unit == 'н':
-                days = amount * 7
-            elif unit == 'м':
-                days = amount * 30
+        if len(parts) < 3:
+            return await event.answer("Неизвестная команда.", alert=True)
+        
+        action = parts[1]  # premium или rest
+        amount = int(parts[2])
+        unit = parts[3] if len(parts) > 3 else 'д'
+        
+        user_id = event.sender_id
+        balance = db.get_premium_points(user_id)
+        
+        cost_mapping = {
+            'premium_1д': 10,
+            'premium_7д': 50,
+            'premium_30д': 125,
+            'rest_1д': 100
+        }
+        
+        # Формируем ключ для поиска стоимости
+        key = f"{action}_{amount}{unit}"
+        cost = cost_mapping.get(key)
+        
+        if not cost:
+            return await event.answer("Неизвестная команда.", alert=True)
+        
+        if balance >= cost:
+            db.add_premium_points(user_id, -cost)
             
-            expiry_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-            db.add_premium(user_id, expiry_date)
-            await event.answer(f"✅ Премиум на {amount}{unit} успешно приобретен!", alert=True)
+            if action == 'premium':
+                if unit == 'д':
+                    days = amount
+                elif unit == 'н':
+                    days = amount * 7
+                elif unit == 'м':
+                    days = amount * 30
+                
+                expiry_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+                db.add_premium(user_id, expiry_date)
+                await event.answer(f"✅ Премиум на {amount}{unit} успешно приобретен!", alert=True)
+            else:
+                await event.answer("✅ Отдых успешно приобретен!", alert=True)
         else:
-            await event.answer("✅ Отдых успешно приобретен!", alert=True)
-    else:
-        await event.answer("❌ У вас недостаточно коинов!", alert=True)
+            await event.answer("❌ У вас недостаточно коинов!", alert=True)
+    except Exception as e:
+        logger.error(f"Ошибка в purchase_handler: {e}")
+        await event.answer("❌ Произошла ошибка при покупке", alert=True)
 
 
 @bot.on(events.CallbackQuery(pattern=r'search_again_(\d+)'))
@@ -2828,27 +3105,50 @@ async def top_day_handler(event):
 @bot.on(events.CallbackQuery(pattern=r'how_to_(become_guarantor|buy_trust|report_scammer)'))
 async def faq_handler(event):
     """FAQ ответы"""
-    faq_type = event.pattern_match.group(1)
+    faq_type = event.data.decode().split('_')[2]
     
     if faq_type == 'become_guarantor':
         response = (
+            "🤔 **Как стать гарантом?**\n\n"
             "Чтобы стать гарантом, нужно пройти набор в нашу базу. "
             "Владельцы регулярно проводят наборы на многие роли, в том числе гарантов. "
-            "Если ты хочешь стать гарантом, просто пройди набор в нашу базу🤗"
+            "Если ты хочешь стать гарантом, просто пройди набор в нашу базу🤗\n\n"
+            "**Требования:**\n"
+            "• Активность в чате\n"
+            "• Отсутствие нарушений\n"
+            "• Готовность помогать другим\n"
+            "• Знание правил базы"
         )
     elif faq_type == 'buy_trust':
         response = (
+            "🤑 **У кого и как купить траст?**\n\n"
             "Хочешь купить траст? Да ты богач🤗. Чтобы купить траст, тебе нужно написать нашим гарантам "
-            "Гарантов ты можешь найти в чате или же нажав на кнопку 'Гаранты' в главном меню🤑"
+            "Гарантов ты можешь найти в чате или же нажав на кнопку 'Гаранты' в главном меню🤑пс данные устарели траст навсегда стоит 1000 руб\n\n"
+            "**Цены:**\n"
+            "• 1 месяц траста: 500₽\n"
+            "• 3 месяца траста: 1200₽\n"
+            "• 6 месяцев траста: 2000₽\n\n"
+            "**Оплата:** @XOMTG"
         )
     elif faq_type == 'report_scammer':
         response = (
+            "😈 **Как слить вам скаммера?**\n\n"
             "Ох, тебя тоже задрали скаммеры? Меня тоже😡 Если ты действительно хочешь слить скаммера, "
             "то тебе нужно зайти в нашу базу и написать в чат доказательства скама и юзернейм-айди. "
-            "Наши волонтёры занесут этого скаммера😈"
+            "Наши волонтёры занесут этого скаммера😈\n\n"
+            "**Что нужно предоставить:**\n"
+            "1. Скриншоты переписки\n"
+            "2. Доказательства перевода денег\n"
+            "3. Юзернейм/ID скаммера\n"
+            "4. Описание ситуации\n\n"
+            "**Куда писать:** https://t.me/WARDREPORT"
         )
     
-    await event.respond(response)
+    buttons = [
+        [Button.inline("↩ Назад к FAQ", "about_project")]
+    ]
+    
+    await event.edit(response, buttons=buttons)
 
 
 @bot.on(events.CallbackQuery(pattern='appeal'))
