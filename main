@@ -1,0 +1,3045 @@
+from telethon import TelegramClient, events, Button, types
+import logging
+from datetime import datetime, timedelta
+from telethon.tl.functions.channels import EditBannedRequest
+from telethon.tl.types import ChatBannedRights
+from telethon.tl.types import PeerUser, User, Channel, ChatAdminRights, PeerChannel
+from telethon.tl.functions.channels import EditAdminRequest
+from telethon.errors import ChatAdminRequiredError, UserNotParticipantError, ChannelInvalidError
+from telethon.tl.types import ChatBannedRights, ChannelParticipantsAdmins, UserStatusRecently, Chat, Channel
+import json
+import os
+import asyncio
+import sqlite3
+import time
+import requests
+import random
+import re
+import hashlib
+import uuid
+from collections import defaultdict
+import sys
+
+# ========== КОНФИГУРАЦИЯ ==========
+BOT_TOKEN = "8371079711:AAEibNv9L7j7W9noxOmj6bTFPDBOfQdBeek"
+API_ID = 23258474
+API_HASH = "f5dd3f52675030a650ca2259f9fb79ce"
+
+OWNERS = {
+    "хомяк": {"id": "7557345458", "username": "XOMTG"},
+    "инсейн": {"id": "5960170498", "username": None}
+}
+
+ADMINS = [7557345458, 5960170498]
+OWNER_ID = [7557345458, 5960170498]
+LOG_CHANNEL = 'https://t.me/+S1XSJVEMW9g1OWZi'
+
+WELCOME_IMAGE = "https://i.ibb.co/wZ61gwPk/IMG-20251216-230901-226.jpg"
+WELCOME_ENABLED = False
+
+# Роли пользователей с ссылками на @WARDREPORT
+ROLES = {
+    0: {"name": "Нет в базе 📝", "preview_url": "https://i.ibb.co/tTnCGRH5/IMG-20251218-220105-765.jpg", "scam_chance": 31},
+    1: {"name": "Гарант 🛡️", "preview_url": "https://i.ibb.co/gLXJ061y/IMG-20251218-220907-223.jpg", "scam_chance": 1},
+    2: {"name": "Возможно скамер ⚠️", "preview_url": "https://i.ibb.co/N6d45hw8/IMG-20251218-215915-862.jpg", "scam_chance": 65},
+    3: {"name": "Скамер ❌", "preview_url": "https://i.ibb.co/bMj3HSV0/IMG-20251218-215910-457.jpg", "scam_chance": 99},
+    4: {"name": "Петух 🐓", "preview_url": "https://i.ibb.co/GfNrHMjr/IMG-20251218-215913-756.jpg", "scam_chance": 45},
+    5: {"name": "Подозрение на скам ⚠️", "preview_url": "https://i.ibb.co/N6d45hw8/IMG-20251218-215915-862.jpg", "scam_chance": 51},
+    6: {"name": "Стажёр 🎓", "preview_url": "https://i.ibb.co/fGdQYjXZ/IMG-20251218-215909-496.jpg", "scam_chance": 20},
+    7: {"name": "Админ 👮", "preview_url": "https://i.ibb.co/LX6vfdM4/IMG-20251218-215928-663.jpg", "scam_chance": 15},
+    8: {"name": "Директор 👔", "preview_url": "https://i.ibb.co/84PXfL67/IMG-20251218-215925-882.jpg", "scam_chance": 10},
+    9: {"name": "Президент 👑", "preview_url": "https://i.ibb.co/7xrvpJrB/IMG-20251218-215906-668.jpg", "scam_chance": 5},
+    10: {"name": "Создатель ⭐", "preview_url": "https://i.ibb.co/395GKLVr/IMG-20251217-215433-120.jpg", "scam_chance": 1},
+    11: {"name": "Кодер 💻", "preview_url": "https://i.ibb.co/LX6vfdM4/IMG-20251218-215928-663.jpg", "scam_chance": 3},
+    12: {"name": "Проверен гарантом ✅", "preview_url": "https://i.ibb.co/3XxfZ8F/photo-2025-06-20-10-22-38-2.jpg", "scam_chance": 5},
+    13: {"name": "Айдош⭐", "preview_url": "https://i.ibb.co/xtQPhT16/image.jpg", "scam_chance": 20}
+}
+
+# Основные кнопки меню с обновленными названиями
+main_buttons = [
+    [Button.text("🎭 Профиль", resize=True)],
+    [Button.text("✅ Гаранты базы", resize=True), Button.text("👨‍🎓 Волонтёры базы", resize=True)],
+    [Button.text("🔰 Проверенные пользователи", resize=True), Button.text("📊 Статистика базы", resize=True)],
+    [Button.text("🔓 Премиум", resize=True), Button.text("❓ Частые вопросы", resize=True)],
+    [Button.text("🚫 Слить скаммера!", resize=True)],
+    [Button.text("🔗 Проверить ссылку", resize=True)]
+]
+
+# Настройки логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('ward_bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Глобальные переменные
+user_scammers_count = {}
+user_states = {}
+checks_count = 0
+last_check_time = {}
+joined_users_cache = set()
+admin_cooldowns = {}
+guarantor_cooldowns = {}
+user_message_count = defaultdict(list)
+muted_users = {}
+games = {}
+START_USERS = set()
+BOT_CHATS = set()
+LAST_CHECKED = {}
+TEMP_STORAGE = {}
+
+# API для загрузки изображений
+IMG_API_KEY = "cb21b904cc405cdfc05731896bc29c64"
+
+# Права для мута
+MUTE_RIGHTS = ChatBannedRights(
+    until_date=None,
+    send_messages=True,
+    send_media=True,
+    send_stickers=True,
+    send_gifs=True,
+    send_games=True,
+    send_inline=True,
+)
+
+# Права для размута
+UNMUTE_RIGHTS = ChatBannedRights(
+    until_date=None,
+    send_messages=False,
+    send_media=False,
+    send_stickers=False,
+    send_gifs=False,
+    send_games=False,
+    send_inline=False,
+)
+
+
+class Database:
+    def __init__(self, db_name='ward_antiscam.db'):
+        logger.info("Инициализация базы данных WARD ANTISCAM...")
+        self.conn = sqlite3.connect(db_name, check_same_thread=False)
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.row_factory = sqlite3.Row
+        self.cursor = self.conn.cursor()
+        self.lock = asyncio.Lock()
+        self.create_tables()
+        self.check_table_structure()
+
+    def create_tables(self):
+        """Создание всех таблиц базы данных"""
+        logger.info("Создание таблиц базы данных...")
+        
+        # Таблица пользователей
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                role_id INTEGER DEFAULT 0,
+                check_count INTEGER DEFAULT 0,
+                last_check_date TEXT,
+                country TEXT DEFAULT 'Не указана',
+                channel TEXT,
+                custom_photo_url TEXT,
+                premium_points INTEGER DEFAULT 0,
+                description TEXT,
+                scammers_slept INTEGER DEFAULT 0,
+                warnings INTEGER DEFAULT 0,
+                custom_status TEXT,
+                granted_by_id INTEGER,
+                curator_id INTEGER,
+                allowance INTEGER DEFAULT 0,
+                last_spin TEXT,
+                premium_expiry TEXT,
+                FOREIGN KEY(curator_id) REFERENCES users(user_id)
+            )
+        ''')
+        
+        # Таблица проверок
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS checks (
+                check_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                checker_id INTEGER,
+                target_id INTEGER,
+                check_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                description TEXT,
+                FOREIGN KEY(checker_id) REFERENCES users(user_id),
+                FOREIGN KEY(target_id) REFERENCES users(user_id)
+            )
+        ''')
+        
+        # Таблица скаммеров
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scammers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER UNIQUE,
+                reason TEXT,
+                reported_by TEXT,
+                description TEXT,
+                reporter_id INTEGER,
+                scammer_id INTEGER,
+                extra_info TEXT,
+                unique_id VARCHAR(255),
+                FOREIGN KEY(scammer_id) REFERENCES users(user_id)
+            )
+        ''')
+        
+        # Таблица статистики
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS statistics (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                total_messages INTEGER DEFAULT 0,
+                total_checks INTEGER DEFAULT 0,
+                total_scammers INTEGER DEFAULT 0,
+                last_update TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Вставка начальной записи статистики, если её нет
+        self.cursor.execute('''
+            INSERT OR IGNORE INTO statistics (id, total_messages, total_checks, total_scammers) 
+            VALUES (1, 0, 0, 0)
+        ''')
+        
+        # Таблица премиум пользователей
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS premium_users (
+                user_id INTEGER PRIMARY KEY,
+                expiry_date TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        ''')
+        
+        # Таблица причин
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reasons (
+                user_id INTEGER PRIMARY KEY,
+                reason TEXT
+            )
+        ''')
+        
+        # Таблица доверия
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trust (
+                user_id INTEGER PRIMARY KEY,
+                granted_by INTEGER,
+                grant_date TEXT
+            )
+        ''')
+        
+        # Таблица сообщений (для статистики активности)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                content TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        ''')
+        
+        # Таблица дополнительных причин
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS additional_reasons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                additional_reason TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        ''')
+        
+        self.conn.commit()
+        logger.info("Все таблицы успешно созданы")
+
+    def check_table_structure(self):
+        """Проверка структуры таблиц"""
+        self.cursor.execute("PRAGMA table_info(users);")
+        columns = self.cursor.fetchall()
+        logger.info("Структура таблицы users:")
+        for column in columns:
+            logger.info(f"  {column[1]}: {column[2]}")
+
+    # ========== БАЗОВЫЕ МЕТОДЫ ==========
+    
+    def user_exists(self, user_id):
+        """Проверяет существование пользователя"""
+        self.cursor.execute("SELECT COUNT(*) FROM users WHERE user_id = ?", (user_id,))
+        return self.cursor.fetchone()[0] > 0
+
+    def add_user(self, user_id, username, role_id=0):
+        """Добавляет нового пользователя"""
+        try:
+            if not self.user_exists(user_id):
+                self.cursor.execute('''
+                    INSERT INTO users (user_id, username, role_id, last_check_date)
+                    VALUES (?, ?, ?, ?)
+                ''', (user_id, username, role_id, datetime.now().isoformat()))
+                self.conn.commit()
+                logger.info(f"Добавлен пользователь {username} (ID: {user_id}) с ролью {role_id}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка добавления пользователя: {e}")
+            return False
+
+    def get_user(self, user_id):
+        """Получает данные пользователя"""
+        self.cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+        return self.cursor.fetchone()
+
+    def get_user_role(self, user_id):
+        """Получает роль пользователя"""
+        user = self.get_user(user_id)
+        return user['role_id'] if user else 0
+
+    def update_role(self, user_id, role_id, granted_by_id=None):
+        """Обновляет роль пользователя"""
+        try:
+            if not self.user_exists(user_id):
+                return False
+                
+            self.cursor.execute('UPDATE users SET role_id = ? WHERE user_id = ?', (role_id, user_id))
+            if granted_by_id:
+                self.cursor.execute('UPDATE users SET granted_by_id = ? WHERE user_id = ?', (granted_by_id, user_id))
+            self.conn.commit()
+            logger.info(f"Роль пользователя {user_id} обновлена на {role_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления роли: {e}")
+            return False
+
+    def get_check_count(self, user_id):
+        """Получает количество проверок пользователя"""
+        user = self.get_user(user_id)
+        return user['check_count'] if user else 0
+
+    def increment_check_count(self, user_id):
+        """Увеличивает счетчик проверок"""
+        try:
+            self.cursor.execute(
+                'UPDATE users SET check_count = check_count + 1 WHERE user_id = ?',
+                (user_id,)
+            )
+            self.conn.commit()
+            logger.info(f"Счетчик проверок для {user_id} увеличен")
+        except Exception as e:
+            logger.error(f"Ошибка увеличения счетчика проверок: {e}")
+
+    # ========== СКАММЕРЫ ==========
+    
+    def add_scammer(self, user_id, reason, reported_by, description, unique_id):
+        """Добавляет скаммера"""
+        try:
+            self.cursor.execute('''
+                INSERT OR REPLACE INTO scammers 
+                (user_id, reason, reported_by, description, unique_id, reporter_id, scammer_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, reason, reported_by, description, unique_id, reported_by, user_id))
+            self.conn.commit()
+            logger.info(f"Добавлен скаммер {user_id}: {reason}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка добавления скаммера: {e}")
+            return False
+
+    def is_scammer(self, user_id):
+        """Проверяет, является ли пользователь скаммером"""
+        self.cursor.execute('SELECT COUNT(*) FROM scammers WHERE user_id = ?', (user_id,))
+        return self.cursor.fetchone()[0] > 0
+
+    def remove_scammer_status(self, user_id):
+        """Удаляет статус скаммера"""
+        try:
+            self.cursor.execute('DELETE FROM scammers WHERE user_id = ?', (user_id,))
+            self.conn.commit()
+            logger.info(f"Статус скаммера удален для {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка удаления статуса скаммера: {e}")
+            return False
+
+    def get_user_scammers_slept(self, user_id):
+        """Получает количество слитых скаммеров"""
+        user = self.get_user(user_id)
+        return user['scammers_slept'] if user else 0
+
+    def increment_scammers_count(self, user_id):
+        """Увеличивает счетчик слитых скаммеров"""
+        try:
+            self.cursor.execute(
+                'UPDATE users SET scammers_slept = scammers_slept + 1 WHERE user_id = ?',
+                (user_id,)
+            )
+            self.conn.commit()
+            logger.info(f"Счетчик скаммеров для {user_id} увеличен")
+        except Exception as e:
+            logger.error(f"Ошибка увеличения счетчика скаммеров: {e}")
+
+    # ========== ПРЕМИУМ ==========
+    
+    def add_premium(self, user_id, expiry_date):
+        """Добавляет премиум статус"""
+        try:
+            self.cursor.execute('''
+                INSERT OR REPLACE INTO premium_users (user_id, expiry_date)
+                VALUES (?, ?)
+            ''', (user_id, expiry_date))
+            self.conn.commit()
+            logger.info(f"Премиум добавлен для {user_id} до {expiry_date}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка добавления премиума: {e}")
+            return False
+
+    def is_premium_user(self, user_id):
+        """Проверяет премиум статус"""
+        self.cursor.execute(
+            'SELECT expiry_date FROM premium_users WHERE user_id = ?',
+            (user_id,)
+        )
+        result = self.cursor.fetchone()
+        if result:
+            expiry_date = datetime.strptime(result['expiry_date'], "%Y-%m-%d %H:%M:%S")
+            return expiry_date > datetime.now()
+        return False
+
+    def get_premium_expiry(self, user_id):
+        """Получает дату окончания премиума"""
+        self.cursor.execute(
+            'SELECT expiry_date FROM premium_users WHERE user_id = ?',
+            (user_id,)
+        )
+        result = self.cursor.fetchone()
+        return result['expiry_date'] if result else None
+
+    def remove_premium(self, user_id):
+        """Удаляет премиум статус"""
+        try:
+            self.cursor.execute('DELETE FROM premium_users WHERE user_id = ?', (user_id,))
+            self.conn.commit()
+            logger.info(f"Премиум удален для {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка удаления премиума: {e}")
+            return False
+
+    # ========== СТАТИСТИКА ==========
+    
+    def update_total_messages(self, count=1):
+        """Обновляет общее количество сообщений"""
+        try:
+            self.cursor.execute(
+                'UPDATE statistics SET total_messages = total_messages + ?, last_update = ? WHERE id = 1',
+                (count, datetime.now().isoformat())
+            )
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка обновления статистики сообщений: {e}")
+
+    def get_total_messages(self):
+        """Получает общее количество сообщений"""
+        self.cursor.execute('SELECT total_messages FROM statistics WHERE id = 1')
+        result = self.cursor.fetchone()
+        return result['total_messages'] if result else 0
+
+    def get_statistics(self):
+        """Получает полную статистику"""
+        self.cursor.execute('SELECT * FROM statistics WHERE id = 1')
+        stats = self.cursor.fetchone()
+        
+        # Получаем дополнительные данные
+        total_users = self.cursor.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+        guarantors = len(self.get_guarantors())
+        trainees = len(self.get_trainees())
+        scammers = self.cursor.execute('SELECT COUNT(*) FROM scammers').fetchone()[0]
+        
+        return {
+            'total_messages': stats['total_messages'] if stats else 0,
+            'total_users': total_users,
+            'guarantors': guarantors,
+            'trainees': trainees,
+            'scammers': scammers,
+            'last_update': stats['last_update'] if stats else None
+        }
+
+    # ========== ДРУГИЕ МЕТОДЫ ==========
+    
+    def update_user(self, user_id, country=None, channel=None, description=None):
+        """Обновляет данные пользователя"""
+        try:
+            updates = []
+            params = []
+            
+            if country is not None:
+                updates.append("country = ?")
+                params.append(country)
+            if channel is not None:
+                updates.append("channel = ?")
+                params.append(channel)
+            if description is not None:
+                updates.append("description = ?")
+                params.append(description)
+                
+            if updates:
+                params.append(user_id)
+                query = f"UPDATE users SET {', '.join(updates)} WHERE user_id = ?"
+                self.cursor.execute(query, params)
+                self.conn.commit()
+                logger.info(f"Данные пользователя {user_id} обновлены")
+        except Exception as e:
+            logger.error(f"Ошибка обновления пользователя: {e}")
+
+    def get_user_custom_photo(self, user_id):
+        """Получает кастомное фото пользователя"""
+        user = self.get_user(user_id)
+        return user['custom_photo_url'] if user else None
+
+    def update_warnings(self, user_id):
+        """Увеличивает количество предупреждений"""
+        try:
+            self.cursor.execute(
+                'UPDATE users SET warnings = warnings + 1 WHERE user_id = ?',
+                (user_id,)
+            )
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка обновления предупреждений: {e}")
+
+    def get_warnings_count(self, user_id):
+        """Получает количество предупреждений"""
+        user = self.get_user(user_id)
+        return user['warnings'] if user else 0
+
+    def reset_warnings(self, user_id):
+        """Сбрасывает предупреждения"""
+        try:
+            self.cursor.execute(
+                'UPDATE users SET warnings = 0 WHERE user_id = ?',
+                (user_id,)
+            )
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка сброса предупреждений: {e}")
+
+    def get_granted_by(self, user_id):
+        """Получает ID гаранта"""
+        user = self.get_user(user_id)
+        return user['granted_by_id'] if user else None
+
+    def add_grant(self, user_id, granted_by_id):
+        """Добавляет запись о гарантии"""
+        try:
+            self.cursor.execute('''
+                INSERT OR REPLACE INTO trust (user_id, granted_by, grant_date)
+                VALUES (?, ?, ?)
+            ''', (user_id, granted_by_id, datetime.now().isoformat()))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка добавления гарантии: {e}")
+
+    def get_premium_points(self, user_id):
+        """Получает премиум поинты"""
+        user = self.get_user(user_id)
+        return user['premium_points'] if user else 0
+
+    def add_premium_points(self, user_id, points):
+        """Добавляет премиум поинты"""
+        try:
+            self.cursor.execute(
+                'UPDATE users SET premium_points = premium_points + ? WHERE user_id = ?',
+                (points, user_id)
+            )
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка добавления премиум поинтов: {e}")
+
+    def get_guarantors(self):
+        """Получает список гарантов"""
+        self.cursor.execute('SELECT user_id FROM users WHERE role_id = 1')
+        return [row['user_id'] for row in self.cursor.fetchall()]
+
+    def get_trainees(self):
+        """Получает список стажеров"""
+        self.cursor.execute('SELECT user_id FROM users WHERE role_id = 6')
+        return [row['user_id'] for row in self.cursor.fetchall()]
+
+    def get_verified_users(self):
+        """Получает список проверенных пользователей"""
+        self.cursor.execute('SELECT user_id FROM users WHERE role_id = 12')
+        return [row['user_id'] for row in self.cursor.fetchall()]
+
+    def update_description(self, user_id, description):
+        """Обновляет описание пользователя"""
+        try:
+            self.cursor.execute(
+                'UPDATE users SET description = ? WHERE user_id = ?',
+                (description, user_id)
+            )
+            self.conn.commit()
+            logger.info(f"Описание пользователя {user_id} обновлено")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления описания: {e}")
+            return False
+
+    def add_additional_reason(self, user_id, additional_reason):
+        """Добавляет дополнительную причину"""
+        try:
+            self.cursor.execute('''
+                INSERT INTO additional_reasons (user_id, additional_reason)
+                VALUES (?, ?)
+            ''', (user_id, additional_reason))
+            self.conn.commit()
+            logger.info(f"Дополнительная причина добавлена для {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка добавления дополнительной причины: {e}")
+            return False
+
+    def close(self):
+        """Закрывает соединение с БД"""
+        self.conn.close()
+        logger.info("Соединение с БД закрыто")
+
+
+# Инициализация базы данных и бота
+db = Database()
+bot = TelegramClient('ward_antiscam.session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+
+
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+
+async def send_response(event, text, buttons=None, parse_mode='md', link_preview=False):
+    """Универсальная функция отправки ответа"""
+    try:
+        if buttons:
+            return await event.respond(text, buttons=buttons, parse_mode=parse_mode, link_preview=link_preview)
+        else:
+            return await event.respond(text, parse_mode=parse_mode, link_preview=link_preview)
+    except Exception as e:
+        logger.error(f"Ошибка отправки сообщения: {e}")
+        return None
+
+
+async def get_user_profile_response(event, user, user_data):
+    """Формирует ответ с профилем пользователя"""
+    user_id = user.id
+    role_id = db.get_user_role(user_id)
+    
+    # Получаем данные пользователя
+    country = user_data['country'] if user_data and user_data['country'] else "❓"
+    channel = user_data['channel'] if user_data and user_data['channel'] else "❓"
+    scammers_slept = db.get_user_scammers_slept(user_id)
+    checks_count = db.get_check_count(user_id)
+    warnings_count = db.get_warnings_count(user_id)
+    current_time = datetime.now().strftime("%d.%m.%Y")
+    
+    # Получаем гаранта если есть
+    granted_by_id = db.get_granted_by(user_id)
+    granted_by_username = "Неизвестный гарант"
+    if granted_by_id:
+        try:
+            granted_by_user = await bot.get_entity(granted_by_id)
+            granted_by_username = granted_by_user.username if granted_by_user.username else granted_by_user.first_name
+        except:
+            pass
+    
+    # Формируем текст профиля
+    if role_id == 0:
+        message_text = (
+            f"[👤][ {user.first_name} ](tg://user?id={user_id}) #id{user_id} [⠀]({ROLES[role_id]['preview_url']})\n\n"
+            f"[❌] Статус: не найден в базе. Риск скама: **44%**\n"
+            f"[ℹ️] [Узнайте о гарантах](https://telegra.ph/Kto-takoj-GARANT-05-29)\n\n"
+            f"[📍] Регион: {country}\n"
+            f"[🚫] Разоблачено скаммеров: {scammers_slept}\n\n"
+            f"[🔒] Используйте Гарантов WARD ANTISCAM для безопасных сделок.\n\n"
+            f"[📅] Дата: {current_time} | 🔎Проверок: {checks_count}\n"
+        )
+    
+    elif role_id == 12:
+        message_text = (
+            f"[👤][ {user.first_name} ](tg://user?id={user_id}) #id{user_id} [⠀]({ROLES[role_id]['preview_url']})\n\n"
+            f"[❌] Статус: Проверен(а) гарантом | [ {granted_by_username} ](tg://user?id={granted_by_id}) ✅\n"
+            f"[ℹ️] [Узнайте о гарантах](https://telegra.ph/Kto-takoj-GARANT-05-29)\n\n"
+            f"[📍] Регион: {country}\n"
+            f"[🚫] Разоблачено скаммеров: {scammers_slept}\n\n"
+            f"[🔒] Используйте Гарантов WARD ANTISCAM для безопасных сделок.\n\n"
+            f"[📅] Дата: {current_time} | 🔎Проверок: {checks_count}\n"
+        )
+    
+    elif role_id == 1:
+        custom_photo = db.get_user_custom_photo(user_id)
+        preview_url = custom_photo if custom_photo else ROLES[role_id]['preview_url']
+        message_text = (
+            f"[👤]({custom_photo})[ {user.first_name} ](tg://user?id={user_id}) #id{user_id} [⠀]({preview_url})\n\n"
+            f"[✅] Статус: Гарант\n"
+            f"[ℹ️] [Узнайте о гарантах](https://telegra.ph/Kto-takoj-GARANT-05-29)\n\n"
+            f"[📍] Регион: {country}\n"
+            f"[🚫] Разоблачено скаммеров: {scammers_slept}\n\n"
+            f"[🔒] Данный пользователь является проверенным гарантом WARD ANTISCAM\n\n"
+            f"[📅] Дата: {current_time} | 🔎Проверок: {checks_count}\n"
+        )
+    
+    elif role_id == 10:
+        message_text = (
+            f"[👤][ {user.first_name} ](tg://user?id={user_id}) #id{user_id} [⠀]({ROLES[role_id]['preview_url']})\n\n"
+            f"[💢] Статус: Владелец\n"
+            f"[💖] [Персонал WARD ANTISCAM](https://t.me/WARDREPORT)\n\n"
+            f"[📍] Регион: {country}\n"
+            f"[🚫] Разоблачено скаммеров: {scammers_slept}\n\n"
+            f"[🔒] Данный пользователь является Создателем базы WARD ANTISCAM\n\n"
+            f"[📅] Дата: {current_time} | 🔎Проверок: {checks_count}\n"
+        )
+    
+    elif role_id == 9:
+        message_text = (
+            f"[👤][ {user.first_name} ](tg://user?id={user_id}) #id{user_id} [⠀]({ROLES[role_id]['preview_url']})\n\n"
+            f"[🧿] Статус: Президент\n"
+            f"[💖] [Персонал WARD ANTISCAM](https://t.me/WARDREPORT)\n\n"
+            f"[📍] Регион: {country}\n"
+            f"[🚫] Разоблачено скаммеров: {scammers_slept}\n\n"
+            f"[⚠] Выговоры: {warnings_count} "
+            f"[🔒] Данный пользователь является надёжным президентом базы WARD ANTISCAM\n\n"
+            f"[📅] Дата: {current_time} | 🔎Проверок: {checks_count}\n"
+        )
+    
+    elif role_id == 3:
+        message_text = (
+            f"[👤][ {user.first_name} ](tg://user?id={user_id}) #id{user_id} [⠀]({ROLES[role_id]['preview_url']})\n\n"
+            f"[🛑] Статус: Скаммер\n\n"
+            f"[📍] Регион: {country}\n"
+            f"[🚫] Разоблачено скаммеров: {scammers_slept}\n\n"
+            f"[❌] Данный пользователь является скаммером! Не идите первыми!\n\n"
+            f"[📅] Дата: {current_time} | 🔎Проверок: {checks_count}\n"
+        )
+    
+    elif role_id == 7:
+        message_text = (
+            f"[👤][ {user.first_name} ](tg://user?id={user_id}) #id{user_id} [⠀]({ROLES[role_id]['preview_url']})\n\n"
+            f"[🔍] Статус: Админ\n"
+            f"[💖] [Персонал WARD ANTISCAM](https://t.me/WARDREPORT)\n\n"
+            f"[📍] Регион: {country}\n"
+            f"[🚫] Разоблачено скаммеров: {scammers_slept}\n\n"
+            f"[⚠] Выговоры: {warnings_count} "
+            f"[🔒] Данный пользователь является Администратором Базы WARD ANTISCAM\n\n"
+            f"[📅] Дата: {current_time} | 🔎Проверок: {checks_count}\n"
+        )
+    
+    elif role_id == 6:
+        message_text = (
+            f"[👤][ {user.first_name} ](tg://user?id={user_id}) #id{user_id} [⠀]({ROLES[role_id]['preview_url']})\n\n"
+            f"[👨‍🎓] Статус: Стажер\n"
+            f"[💖] [Персонал WARD ANTISCAM](https://t.me/WARDREPORT)\n\n"
+            f"[📍] Регион: {country}\n"
+            f"[🚫] Разоблачено скаммеров: {scammers_slept}\n\n"
+            f"[⚠] Выговоры: {warnings_count}\n"
+            f"[📣] Канал: {channel}\n\n"         
+            f"[🔒] Данный пользователь является Стажёром Базы WARD ANTISCAM\n\n"
+            f"[📅] Дата: {current_time} | 🔎Проверок: {checks_count}\n"
+        )
+    
+    elif role_id == 8:
+        message_text = (
+            f"[👤][ {user.first_name} ](tg://user?id={user_id}) #id{user_id} [⠀]({ROLES[role_id]['preview_url']})\n\n"
+            f"[‍🎩] Статус: Директор\n"
+            f"[💖] [Персонал WARD ANTISCAM](https://t.me/WARDREPORT)\n\n"
+            f"[📍] Регион: {country}\n"
+            f"[🚫] Разоблачено скаммеров: {scammers_slept}\n\n"
+            f"[⚠] Выговоры: {warnings_count}\n"
+            f"[📣] Канал: {channel}\n\n"         
+            f"[🔒] Данный пользователь является Директором Базы WARD ANTISCAM\n\n"
+            f"[📅] Дата: {current_time} | 🔎Проверок: {checks_count}\n"
+        )
+    
+    elif role_id == 11:
+        message_text = (
+            f"[👤][ {user.first_name} ](tg://user?id={user_id}) #id{user_id} [⠀]({ROLES[role_id]['preview_url']})\n\n"
+            f"[👨‍💻] Статус: Кодер\n"
+            f"[💖] [Персонал WARD ANTISCAM](https://t.me/WARDREPORT)\n\n"
+            f"[📍] Регион: {country}\n"
+            f"[🚫] Разоблачено скаммеров: {scammers_slept}\n\n"
+            f"[⚠] Выговоры: {warnings_count}\n"
+            f"[📣] Канал: {channel}\n\n"         
+            f"[🔒] Данный пользователь является Техническим Специалистом Базы WARD ANTISCAM\n\n"
+            f"[📅] Дата: {current_time} | 🔎Проверок: {checks_count}\n"
+        )
+    
+    else:
+        message_text = f"[👤][ {user.first_name} ](tg://user?id={user_id})\n\nСтатус: {ROLES[role_id]['name']}\n\nРиск скама: {ROLES[role_id]['scam_chance']}%"
+    
+    # Кнопки
+    buttons = [[
+        Button.url("🎧 Профиль", f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}")
+    ]]
+    
+    return message_text, buttons
+
+
+async def check_admin(chat_id, user_id):
+    """Проверяет, является ли пользователь администратором"""
+    if user_id in ADMINS:
+        return True
+    
+    try:
+        chat = await bot.get_entity(chat_id)
+        # Для супергрупп
+        if hasattr(chat, 'admin_rights'):
+            participant = await bot.get_permissions(chat_id, user_id)
+            return participant.is_admin
+        # Для обычных групп
+        elif isinstance(chat, Chat):
+            admins = await bot.get_participants(chat_id, filter=ChannelParticipantsAdmins)
+            return any(admin.id == user_id for admin in admins)
+    except Exception as e:
+        logger.error(f"Ошибка проверки прав администратора: {e}")
+        return False
+
+
+async def check_chat_type(chat_id):
+    """Проверяет тип чата"""
+    try:
+        chat = await bot.get_entity(chat_id)
+        
+        if isinstance(chat, Channel):
+            return "channel"
+        elif hasattr(chat, 'megagroup') and chat.megagroup:
+            return "supergroup"
+        elif isinstance(chat, Chat):
+            return "group"
+        else:
+            return "private"
+    except:
+        return "unknown"
+
+
+async def can_use_moderation(chat_id, user_id):
+    """Проверяет возможность использования модерации"""
+    # Проверяем админские права
+    if not await check_admin(chat_id, user_id):
+        return False, "Вы не являетесь администратором в этом чате"
+    
+    # Проверяем тип чата
+    chat_type = await check_chat_type(chat_id)
+    
+    if chat_type == "private":
+        return False, "Модерация недоступна в личных сообщениях"
+    
+    # Проверяем права бота
+    try:
+        bot_user = await bot.get_me()
+        bot_permissions = await bot.get_permissions(chat_id, bot_user.id)
+        
+        if not bot_permissions.is_admin:
+            return False, "Бот должен быть администратором для использования модерации"
+            
+        if not bot_permissions.ban_users:
+            return False, "Боту нужны права на бан пользователей"
+    except:
+        return False, "Не удалось проверить права бота"
+    
+    return True, ""
+
+
+async def mute_user_in_chat(chat_id, user_id, duration_minutes=60, reason=""):
+    """Безопасный мут пользователя в чате"""
+    try:
+        chat_type = await check_chat_type(chat_id)
+        
+        if chat_type in ["supergroup", "channel"]:
+            # Для супергрупп и каналов используем стандартный метод
+            until_date = datetime.now() + timedelta(minutes=duration_minutes)
+            await bot.edit_permissions(
+                chat_id,
+                user_id,
+                until_date=until_date,
+                send_messages=False,
+                send_media=False,
+                send_stickers=False,
+                send_gifs=False,
+                send_games=False,
+                send_inline=False,
+                embed_links=False
+            )
+        elif chat_type == "group":
+            # Для обычных групп - упрощенный метод
+            try:
+                await bot.edit_permissions(
+                    chat_id,
+                    user_id,
+                    until_date=int(time.time() + (duration_minutes * 60)),
+                    send_messages=False
+                )
+            except:
+                # Если не получается, просто предупреждаем
+                return False, f"Не удалось выдать мут в обычной группе. Включите режим супергруппы."
+        else:
+            return False, "Неизвестный тип чата"
+        
+        return True, "Мут успешно выдан"
+    except ChatAdminRequiredError:
+        return False, "У бота недостаточно прав"
+    except Exception as e:
+        logger.error(f"Ошибка при муте пользователя: {e}")
+        return False, f"Ошибка: {str(e)}"
+
+
+async def unmute_user_in_chat(chat_id, user_id):
+    """Безопасный размут пользователя в чате"""
+    try:
+        chat_type = await check_chat_type(chat_id)
+        
+        if chat_type in ["supergroup", "channel"]:
+            await bot.edit_permissions(
+                chat_id,
+                user_id,
+                send_messages=True,
+                send_media=True,
+                send_stickers=True,
+                send_gifs=True,
+                send_games=True,
+                send_inline=True,
+                embed_links=True
+            )
+        elif chat_type == "group":
+            try:
+                await bot.edit_permissions(
+                    chat_id,
+                    user_id,
+                    send_messages=True
+                )
+            except:
+                return False, "Не удалось снять мут в обычной группе"
+        else:
+            return False, "Неизвестный тип чата"
+        
+        return True, "Размут успешно выполнен"
+    except Exception as e:
+        logger.error(f"Ошибка при размуте пользователя: {e}")
+        return False, f"Ошибка: {str(e)}"
+
+
+async def ban_user_in_chat(chat_id, user_id, duration_minutes=1440, reason=""):
+    """Безопасный бан пользователя в чате"""
+    try:
+        chat_type = await check_chat_type(chat_id)
+        
+        if chat_type in ["supergroup", "channel"]:
+            until_date = datetime.now() + timedelta(minutes=duration_minutes)
+            await bot.edit_permissions(
+                chat_id,
+                user_id,
+                until_date=until_date,
+                view_messages=False
+            )
+        elif chat_type == "group":
+            try:
+                # В обычных группах кикаем пользователя
+                await bot.kick_participant(chat_id, user_id)
+            except:
+                return False, "Не удалось забанить в обычной группе"
+        else:
+            return False, "Неизвестный тип чата"
+        
+        return True, "Бан успешно выдан"
+    except Exception as e:
+        logger.error(f"Ошибка при бане пользователя: {e}")
+        return False, f"Ошибка: {str(e)}"
+
+
+async def unban_user_in_chat(chat_id, user_id):
+    """Безопасный разбан пользователя в чате"""
+    try:
+        chat_type = await check_chat_type(chat_id)
+        
+        if chat_type in ["supergroup", "channel"]:
+            await bot.edit_permissions(
+                chat_id,
+                user_id,
+                view_messages=True
+            )
+        elif chat_type == "group":
+            # В обычных группах приглашаем обратно
+            try:
+                await bot.edit_permissions(
+                    chat_id,
+                    user_id,
+                    until_date=0,
+                    view_messages=True
+                )
+            except:
+                return False, "Не удалось разбанить в обычной группе"
+        else:
+            return False, "Неизвестный тип чата"
+        
+        return True, "Разбан успешно выполнен"
+    except Exception as e:
+        logger.error(f"Ошибка при разбане пользователя: {e}")
+        return False, f"Ошибка: {str(e)}"
+
+
+async def send_log(action, admin, user, duration=None, chat=None, reason=None, message_link=None):
+    """Отправляет логи в канал"""
+    text = (
+        f"**{action.upper()}**\n\n"
+        f"👤 **Пользователь:** {user.first_name} (`{user.id}`)\n"
+        f"👮 **Администратор:** {admin.first_name} (`{admin.id}`)\n"
+    )
+    
+    if chat:
+        text += f"💬 **Чат:** {chat.title if hasattr(chat, 'title') else 'Неизвестно'} (`{chat.id}`)\n"
+    if duration:
+        text += f"⏳ **Длительность:** {duration}\n"
+    if reason:
+        text += f"📝 **Причина:** {reason}\n"
+    if message_link:
+        text += f"🔗 **Сообщение:** [ссылка]({message_link})"
+    
+    try:
+        await bot.send_message(LOG_CHANNEL, text, link_preview=False)
+    except Exception as e:
+        logger.error(f"Ошибка отправки лога: {e}")
+
+
+# ========== ОСНОВНЫЕ КОМАНДЫ ==========
+
+@bot.on(events.NewMessage(pattern='/start'))
+async def start(event):
+    """Обработчик команды /start"""
+    sender = await event.get_sender()
+    START_USERS.add(event.sender_id)
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(sender.id):
+        db.add_user(sender.id, sender.username)
+    
+    inline_buttons = [
+        [Button.inline("🖌️ | Кастом картинки", "custom_pics"),
+         Button.inline("👋 | Добавить в группу", "add_group")],
+        [Button.inline("🔥 | Пожаловаться на скамера", "report_scammer")],
+        [Button.inline("🤗 | Создатель", "creator")],
+        [Button.inline("💝 Поддержать", "support_handler")],
+        [Button.inline("ℹ️ О проекте", "about_project")]
+    ]
+    
+    welcome_text = (
+        "Мы - WARD ANTISCAM Глобальная АнтиСкам база нового поколения[⠀](https://i.ibb.co/wZ61gwPk/IMG-20251216-230901-226.jpg)!\n"
+        f"🤓 Проверим человека на скам\n"
+        "🤠 Найдём проверенного гаранта\n"
+        "🤕 Поможем слить скаммера\n\n"
+        "ℹ️ Используйте кнопки ниже для диалога с ботом"
+    )
+    
+    await send_response(event, welcome_text, buttons=inline_buttons, link_preview=True)
+    
+    await send_response(
+        event,
+        """🍀 | 🎮 Меню бота, используйте кнопки ниже для навигации.
+
+🌿 | Для проверки Пропишите:
+<pre>чек @XOMTG</pre>""",
+        buttons=main_buttons,
+        parse_mode='html'
+    )
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^(чек|чек ми|чек я|чек себя|check|/check)'))
+async def check_user(event):
+    """Обработчик проверки пользователя"""
+    global checks_count
+    user_id = event.sender_id
+    user = await event.get_sender()
+    
+    # Проверка кулдауна
+    current_time = time.time()
+    if user_id in last_check_time:
+        elapsed_time = current_time - last_check_time[user_id]
+        if elapsed_time < 5:
+            remaining_time = 5 - elapsed_time
+            return await send_response(
+                event,
+                f"💄 Братаны терпели, и ты потерпи {remaining_time:.1f} секунд(ы)!"
+            )
+    
+    last_check_time[user_id] = current_time
+    
+    # Определяем пользователя для проверки
+    user_to_check = None
+    if event.reply_to_msg_id:
+        replied = await event.get_reply_message()
+        user_to_check = await event.client.get_entity(replied.sender_id)
+    else:
+        if "чек себя" in event.raw_text.lower() or "чек ми" in event.raw_text.lower():
+            user_to_check = user
+        else:
+            args = event.raw_text.split()[1:]
+            if args:
+                try:
+                    if args[0].isdigit():
+                        user_to_check = await event.client.get_entity(int(args[0]))
+                    elif args[0].startswith('@'):
+                        user_to_check = await event.client.get_entity(args[0])
+                except:
+                    return await send_response(event, "❌ | Не удалось найти пользователя.")
+    
+    if not user_to_check:
+        return await send_response(event, "❌ | Не удалось определить пользователя.")
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(user_to_check.id):
+        db.add_user(user_to_check.id, user_to_check.username)
+    
+    # Увеличиваем счетчики
+    db.increment_check_count(user_to_check.id)
+    checks_count += 1
+    
+    # Получаем данные пользователя
+    user_data = db.get_user(user_to_check.id)
+    
+    # Формируем и отправляем ответ
+    message_text, buttons = await get_user_profile_response(event, user_to_check, user_data)
+    await send_response(event, message_text, buttons=buttons, link_preview=True)
+    
+    # Уведомление для премиум-пользователей
+    if db.is_premium_user(user_id):
+        try:
+            await bot.send_message(
+                user_id,
+                f'🔍 Пользователь [{user.first_name}](tg://user?id={user_id}) проверял вас в боте!',
+                buttons=Button.inline("↩Скрыть", b"hide_message")
+            )
+        except:
+            pass
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^/скам|/sc|/scam'))
+async def scam_command(event):
+    """Обработчик команды добавления скаммера"""
+    user_id = event.sender_id
+    user_role = db.get_user_role(user_id)
+    
+    # Проверка прав
+    allowed_roles = [6, 8, 10, 11, 9]
+    if user_role not in allowed_roles and user_id not in OWNER_ID:
+        return await send_response(event, "❌ У вас нет прав для использования этой команды")
+    
+    args = event.raw_text.split(maxsplit=2)
+    if len(args) < 3:
+        return await send_response(event, "❌ Используйте: /скам @username/ID *причина*")
+    
+    target = args[1]
+    reason = args[2].strip('*')
+    
+    try:
+        if target.isdigit():
+            user = await event.client.get_entity(int(target))
+        else:
+            if target.startswith('@'):
+                target = target[1:]
+            user = await event.client.get_entity(target)
+    except:
+        return await send_response(event, "❌ Не могу найти пользователя")
+    
+    # Проверка роли пользователя
+    target_user_role = db.get_user_role(user.id)
+    if target_user_role == 10:
+        return await send_response(event, "❌ Действие не допустимо, вы не можете занести владельца базы!")
+    
+    # Генерация уникального ID
+    unique_id = str(uuid.uuid4())
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(user.id):
+        db.add_user(user.id, user.username)
+    
+    # Добавляем скаммера
+    db.add_scammer(user.id, reason, str(user_id), reason, unique_id)
+    
+    # Создаем кнопки
+    buttons = [
+        [Button.inline("Скамер ❌", f"mark_scammer_{user.id}_{unique_id}")],
+        [Button.inline("Возможно скаммер ⚠️", f"mark_possible_{user.id}_{unique_id}")],
+        [Button.inline("Подозрение на скам ⚠️", f"mark_suspect_{user.id}_{unique_id}")],
+        [Button.inline("Петух 🐓", f"mark_rooster_{user.id}_{unique_id}")]
+    ]
+    
+    await send_response(
+        event,
+        f"⚠️ Выберите роль для пользователя {user.first_name} | 🆔 {user.id}\n\n",
+        buttons=buttons
+    )
+
+
+@bot.on(events.NewMessage(pattern=r'/траст|!trust'))
+async def trust_command(event):
+    """Обработчик выдачи траста"""
+    sender = await event.get_sender()
+    
+    # Проверка роли
+    if db.get_user_role(sender.id) not in [1, 10]:
+        return await send_response(
+            event,
+            "**⚠️ Отказано в доступе!**\n\n"
+            f"**👤 Пользователь:** [{sender.first_name}](tg://user/{sender.id})\n"
+            "**📛 Причина:** Недостаточно прав\n"
+            "**ℹ️ Информация:** Выдавать траст могут только гаранты и создатель",
+            link_preview=True
+        )
+    
+    # Получаем целевого пользователя
+    if event.is_reply:
+        replied = await event.get_reply_message()
+        target = await event.client.get_entity(replied.sender_id)
+    else:
+        args = event.raw_text.split()
+        if len(args) < 2:
+            return await send_response(
+                event,
+                "**❌ Использование:**\n• `/trust` (ответом на сообщение)\n• `/trust @username`\n• `/trust ID`"
+            )
+        try:
+            target = await event.client.get_entity(args[1])
+        except:
+            return await send_response(event, "**❌ Не удалось найти пользователя**")
+    
+    # Проверяем, не является ли целевой пользователь персоналом
+    target_role = db.get_user_role(target.id)
+    if target_role in [6, 7, 8, 9, 10, 11, 12]:
+        return await send_response(
+            event,
+            f"**❌ Ошибка!**\n\n"
+            f"**📛 Причина:** Нельзя выдавать траст персоналу.\n"
+            f"**📝 Текущая роль:** {ROLES[target_role]['name']}"
+        )
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(target.id):
+        db.add_user(target.id, target.username)
+    
+    # Устанавливаем роль "Проверен гарантом"
+    db.update_role(target.id, 12, granted_by_id=sender.id)
+    db.add_grant(target.id, sender.id)
+    
+    await send_response(
+        event,
+        f"**✅ Траст успешно выдан!**\n\n"
+        f"**👤 Получатель:** [{target.first_name}](tg://user/{target.id})\n"
+        f"**👮 Выдал:** [{sender.first_name}](tg://user/{sender.id})\n"
+        f"💙 Репутация: Проверен(а) гарантом ✅"
+    )
+
+
+@bot.on(events.NewMessage(pattern=r'/untrust|/антраст|-антраст'))
+async def untrust_command(event):
+    """Обработчик снятия траста"""
+    sender = await event.get_sender()
+    sender_role = db.get_user_role(sender.id)
+    
+    # Проверка прав
+    if sender_role != 1 and sender.id not in OWNER_ID and sender_role not in [10, 11]:
+        return await send_response(
+            event,
+            "**⚠️ Отказано!**\n\n"
+            f"**👤 Пользователь:** [{sender.first_name}](tg://user/{sender.id})\n"
+            "**📛 Причина:** У тебя прав нету\n"
+            "**ℹ️ Информация:** Снимать траст могут только гаранты, создатель и владельцы",
+            link_preview=True
+        )
+    
+    # Получаем целевого пользователя
+    if event.is_reply:
+        replied = await event.get_reply_message()
+        target = await event.client.get_entity(replied.sender_id)
+    else:
+        args = event.raw_text.split()
+        if len(args) < 2:
+            return await send_response(
+                event,
+                "**❌ Использование:**\n• `/untrust` (ответом на сообщение)\n• `/untrust @username`\n• `/untrust ID`"
+            )
+        try:
+            target = await event.client.get_entity(args[1])
+        except:
+            return await send_response(event, "**❌ Не удалось найти пользователя**")
+    
+    # Проверяем, есть ли у пользователя траст
+    if db.get_user_role(target.id) != 12:
+        return await send_response(event, "**❌ У пользователя нет траста**")
+    
+    # Снимаем траст
+    db.update_role(target.id, 0)
+    
+    await send_response(
+        event,
+        "**✅ Траст успешно снят!**\n\n"
+        f"**👤 Пользователь:** [{target.first_name}](tg://user/{target.id})\n"
+        f"**👮 Снял:** [{sender.first_name}](tg://user/{sender.id})"
+    )
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^(выговор|/выговор)'))
+async def warning_handler(event):
+    """Обработчик выдачи выговоров"""
+    if not event.is_reply:
+        return await send_response(event, "❌ Пожалуйста, используйте команду в ответ на сообщение пользователя.")
+    
+    replied = await event.get_reply_message()
+    target_user = await event.client.get_entity(replied.sender_id)
+    
+    # Проверка прав
+    user_role = db.get_user_role(event.sender_id)
+    if user_role not in [7, 8, 9, 10]:
+        return await send_response(event, "❌ У вас нет прав для выдачи выговора.")
+    
+    # Проверяем, не владелец ли
+    target_user_role = db.get_user_role(target_user.id)
+    if target_user_role == 10:
+        return await send_response(event, "❌ Нельзя выдавать выговоры владельцу!")
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(target_user.id):
+        db.add_user(target_user.id, target_user.username)
+    
+    # Увеличиваем количество выговоров
+    db.update_warnings(target_user.id)
+    warnings_count = db.get_warnings_count(target_user.id)
+    
+    if warnings_count >= 3:
+        # Снимаем статус
+        db.update_role(target_user.id, 0)
+        db.reset_warnings(target_user.id)
+        await send_response(
+            event,
+            f"✅ Пользователь [{target_user.first_name}](tg://user/{target_user.id}) "
+            f"получил 3 выговора и теперь имеет статус 'Нет в базе'."
+        )
+    else:
+        await send_response(
+            event,
+            f"✅ Выговор выдан пользователю [{target_user.first_name}](tg://user/{target_user.id}) "
+            f"(Всего: {warnings_count}/3)"
+        )
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^(/-выговор|снять выговор)'))
+async def remove_warnings_handler(event):
+    """Обработчик снятия выговоров"""
+    if not event.is_reply:
+        return await send_response(event, "❌ Пожалуйста, используйте команду в ответ на сообщение пользователя.")
+    
+    replied = await event.get_reply_message()
+    target_user = await event.client.get_entity(replied.sender_id)
+    
+    # Проверка прав
+    user_role = db.get_user_role(event.sender_id)
+    if user_role not in [7, 8, 9, 10]:
+        return await send_response(event, "❌ У вас нет прав для снятия выговоров.")
+    
+    # Получаем текущее количество выговоров
+    warnings_count = db.get_warnings_count(target_user.id)
+    
+    if warnings_count <= 0:
+        return await send_response(
+            event,
+            f"❌ У пользователя [{target_user.first_name}](tg://user/{target_user.id}) нет выговоров."
+        )
+    
+    # Уменьшаем количество выговоров
+    db.cursor.execute(
+        'UPDATE users SET warnings = warnings - 1 WHERE user_id = ?',
+        (target_user.id,)
+    )
+    db.conn.commit()
+    
+    await send_response(
+        event,
+        f"✅ Выговор снят у пользователя [{target_user.first_name}](tg://user/{target_user.id})."
+    )
+
+
+@bot.on(events.NewMessage(pattern=r'[+-](?:[А-Яа-я]+)(?:\s+(?:@?\w+|\d+))?'))
+async def handle_role_command(event):
+    """Обработчик выдачи и снятия ролей"""
+    user_role = db.get_user_role(event.sender_id)
+    is_admin = event.sender_id in OWNER_ID or user_role == 10
+    
+    if not is_admin:
+        return await send_response(
+            event,
+            "❌ У вас нет прав для выполнения этой команды",
+            buttons=Button.inline("↩Скрыть", b"hide_message")
+        )
+    
+    command_parts = event.raw_text.split()
+    action = command_parts[0][0]  # + или -
+    role = command_parts[0][1:].lower()
+    
+    # Получаем целевого пользователя
+    try:
+        if len(command_parts) > 1:
+            target = command_parts[1]
+            if target.isdigit():
+                user = await event.client.get_entity(int(target))
+            else:
+                if target.startswith('@'):
+                    target = target[1:]
+                user = await event.client.get_entity(target)
+        else:
+            if not event.is_reply:
+                return await send_response(
+                    event,
+                    "❌ Укажите пользователя или ответьте на его сообщение",
+                    buttons=Button.inline("↩Скрыть", b"hide_message")
+                )
+            replied = await event.get_reply_message()
+            user = await event.client.get_entity(replied.sender_id)
+    except:
+        return await send_response(
+            event,
+            "❌ Не удалось найти пользователя!",
+            buttons=Button.inline("↩Скрыть", b"hide_message")
+        )
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(user.id):
+        db.add_user(user.id, user.username)
+    
+    role_mapping = {
+        'стажер': 6,
+        'админ': 7,
+        'директор': 8,
+        'президент': 9,
+        'гарант': 1,
+        'кодер': 11,
+        'создатель': 10,
+        'айдош': 13
+    }
+    
+    current_role = db.get_user_role(user.id)
+    
+    if action == '+':
+        # Проверка для президента
+        if user_role == 9 and role in ['президент']:
+            return await send_response(
+                event,
+                "❌ Президент не может выдавать роль президента.",
+                buttons=Button.inline("↩Скрыть", b"hide_message")
+            )
+        
+        if current_role in [0, 1]:
+            db.update_role(user.id, role_mapping[role])
+            await send_response(
+                event,
+                f"✅ Роль {role} выдана пользователю [{user.first_name}](tg://user?id={user.id})",
+                buttons=Button.inline("↩Скрыть", b"hide_message")
+            )
+        else:
+            await send_response(
+                event,
+                "❌ Нельзя выдавать роль пользователю, который уже имеет роль.",
+                buttons=Button.inline("↩Скрыть", b"hide_message")
+            )
+    else:
+        if current_role > 0:
+            db.update_role(user.id, 0)
+            await send_response(
+                event,
+                f"✅ Роль снята с пользователя [{user.first_name}](tg://user?id={user.id})",
+                buttons=Button.inline("↩Скрыть", b"hide_message")
+            )
+        else:
+            await send_response(
+                event,
+                "❌ У пользователя нет роли",
+                buttons=Button.inline("↩Скрыть", b"hide_message")
+            )
+
+
+@bot.on(events.NewMessage(pattern="🎭 Профиль"))
+async def my_profile(event):
+    """Обработчик кнопки профиля"""
+    if not event.is_private:
+        try:
+            await event.delete()
+        except:
+            pass
+        return
+    
+    user = await event.get_sender()
+    user_id = user.id
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(user_id):
+        db.add_user(user_id, user.username)
+    
+    user_data = db.get_user(user_id)
+    role_id = user_data['role_id'] if user_data else 0
+    role_info = ROLES[role_id]
+    
+    checks_count = db.get_check_count(user_id)
+    scammers_slept = 0
+    
+    # Для персонала показываем количество слитых скаммеров
+    if role_id in [6, 7, 8, 9, 10]:
+        scammers_slept = db.get_user_scammers_slept(user_id)
+    
+    # Статус премиума
+    premium_status = "✅" if db.is_premium_user(user_id) else "❌"
+    
+    profile_text = f"""
+👤 **Профиль пользователя в базе:** [{user.first_name}](tg://user/{user_id})
+
+🔍 **Вас проверяли:** `{checks_count}` раз
+🔥 **Скаммеров слито:** `{scammers_slept}`
+📝 **Роль в базе:** {role_info['name']}
+👑 **WARD Премиум:** {premium_status}
+[⠀](https://i.ibb.co/QF3TxtWG/temp-5173733679-1333.jpg)
+"""
+    
+    # Определяем текст кнопки для кастомного изображения
+    custom_photo = db.get_user_custom_photo(user_id)
+    custom_button_text = "🎆 Снять кастомное изображение" if custom_photo else "🎆 Установить кастомку"
+    custom_callback_data = "remove_custom" if custom_photo else "custom_soon"
+    
+    buttons = [
+        [Button.inline("🔎 Проверить себя", "check_soon"),
+         Button.inline("🎨 Тема проверки", "themes_soon")],
+        [Button.inline("📢 Канал", "channel_soon"),
+         Button.inline("🌍 Страна", "country_soon")],
+        [Button.inline(custom_button_text, custom_callback_data)]
+    ]
+    
+    await send_response(event, profile_text, buttons=buttons, link_preview=True)
+
+
+@bot.on(events.NewMessage(pattern="✅ Гаранты базы"))
+async def list_garants(event):
+    """Обработчик кнопки списка гарантов"""
+    if not event.is_private:
+        return
+    
+    loading_message = await send_response(event, "🔄 Поиск гарантов...")
+    
+    # Получаем гарантов
+    guarantors = db.get_guarantors()
+    
+    if not guarantors:
+        await loading_message.edit("На данный момент гарантов нет ⛔")
+        return
+    
+    text = f"""💢 Актуальный список гарантов WARD ANTISCAM
+━━━━━━━━━━━━━━
+• Всего: {len(guarantors)}
+━━━━━━━━━━━━━━
+💡 Если хотите стать гарантом, пройдите набор!
+[⠀](https://i.ibb.co/XrQN5hzc/temp-5173733679-1331.jpg)"""
+    
+    buttons = []
+    for uid in guarantors[:20]:  # Ограничиваем количество кнопок
+        try:
+            user = await bot.get_entity(uid)
+            buttons.append([Button.inline(f"🛡️ {user.first_name}", f"check_{uid}")])
+        except:
+            continue
+    
+    await loading_message.delete()
+    await send_response(event, text, buttons=buttons, link_preview=True)
+
+
+@bot.on(events.NewMessage(pattern="📊 Статистика базы"))
+async def statistics(event):
+    """Обработчик кнопки статистики"""
+    if not event.is_private:
+        return
+    
+    loading_message = await send_response(event, "🔄 Загрузка статистики...")
+    
+    # Получаем статистику
+    stats = db.get_statistics()
+    
+    text = f"""🔍 Статистика WARD ANTISCAM:
+[⠀](https://i.ibb.co/Fzpqd0K/IMG-3735.jpg)
+
+👥 Пользователей: {stats['total_users']}
+💎 Гарантов: {stats['guarantors']}
+👨‍🎓 Стажеров: {stats['trainees']}
+🚫 Скаммеров: {stats['scammers']}
+
+📩 Сообщений: {stats['total_messages']}
+🔄 Последнее обновление: {stats['last_update'][:19] if stats['last_update'] else 'Неизвестно'}
+"""
+    
+    buttons = [
+        [Button.inline("🏆 Топ Стажеров", b"top_trainees")],
+        [Button.inline("😎 Топ Активных", b"top_day")]
+    ]
+    
+    await loading_message.delete()
+    await send_response(event, text, buttons=buttons, link_preview=True)
+
+
+@bot.on(events.NewMessage(pattern="🚫 Слить скаммера!"))
+async def report_scammer(event):
+    """Обработчик кнопки слива скаммера"""
+    if not event.is_private:
+        return
+    
+    keyboard = types.KeyboardButtonUrl(
+        text="🚨 Отправить жалобу", 
+        url="https://t.me/WARDREPORT"
+    )
+    
+    text = """🔥 Вы хотите слить скаммера? 🔥
+
+⚡️ Лучшее решение:
+• Нажмите кнопку "🚨 Отправить жалобу"
+• Наш персонал примет меры в течение некоторого времени, просто скиньте пруфы!
+
+🔒 Как избежать скама?:
+1. ✅ Всегда проверяйте пользователя через /check
+2. ✅ Используйте только официальных гарантов
+3. ✅ Требуйте подтверждающие скриншоты
+4. ✅ При малейших сомнениях - отменяйте сделку
+
+📛 Помните: 95% скама можно избежать, следуя этим правилам!
+[⠀](https://i.ibb.co/Z11xspsh/temp-5173733679-1329.jpg)"""
+    
+    await send_response(event, text, buttons=keyboard, link_preview=True)
+
+
+@bot.on(events.NewMessage(pattern="👨‍🎓 Волонтёры базы"))
+async def list_volunteers(event):
+    """Обработчик кнопки списка волонтеров"""
+    if not event.is_private:
+        return
+    
+    loading_message = await send_response(event, "🔄 Поиск волонтеров...")
+    
+    # Получаем волонтеров (роли 6-10)
+    volunteers = []
+    for role_id in [6, 7, 8, 9, 10]:
+        db.cursor.execute('SELECT user_id FROM users WHERE role_id = ?', (role_id,))
+        volunteers.extend([row[0] for row in db.cursor.fetchall()])
+    
+    if not volunteers:
+        await loading_message.edit("На данный момент волонтёров нет ⛔")
+        return
+    
+    text = f"""🤝 Актуальный список волонтёров WARD ANTISCAM
+━━━━━━━━━━━━━━
+• Всего: {len(volunteers)}
+━━━━━━━━━━━━━━
+💡 Если вы хотите стать волонтёром базы, просто пройдите набор!
+[⠀](https://i.ibb.co/MYm2Qwz/temp-5173733679-1330.jpg)"""
+    
+    buttons = []
+    for uid in volunteers[:20]:
+        try:
+            user = await bot.get_entity(uid)
+            role_id = db.get_user_role(uid)
+            role_name = ROLES[role_id]["name"]
+            buttons.append([Button.inline(f"{role_name} {user.first_name}", f"check_{uid}")])
+        except:
+            continue
+    
+    await loading_message.delete()
+    await send_response(event, text, buttons=buttons, link_preview=True)
+
+
+@bot.on(events.NewMessage(pattern="🔰 Проверенные пользователи"))
+async def list_verified_users(event):
+    """Обработчик кнопки списка проверенных пользователей"""
+    if not event.is_private:
+        return
+    
+    loading_message = await send_response(event, "🔄 Поиск проверенных пользователей...")
+    
+    # Получаем проверенных пользователей
+    verified_users = db.get_verified_users()
+    
+    if not verified_users:
+        await loading_message.edit("На данный момент проверенных пользователей нет ⛔")
+        return
+    
+    text = f"""📊 Список проверенных пользователей WARD ANTISCAM
+━━━━━━━━━━━━━━
+• Всего: {len(verified_users)}
+━━━━━━━━━━━━━━
+"""
+    
+    buttons = []
+    for uid in verified_users[:20]:
+        try:
+            user = await bot.get_entity(uid)
+            buttons.append([Button.inline(f"✅ {user.first_name}", f"check_{uid}")])
+        except:
+            continue
+    
+    await loading_message.delete()
+    await send_response(event, text, buttons=buttons, link_preview=True)
+
+
+@bot.on(events.NewMessage(pattern="🔓 Премиум"))
+async def premium_info(event):
+    """Обработчик кнопки премиума"""
+    if not event.is_private:
+        return
+    
+    loading_message = await send_response(event, "🔄 Загрузка информации о премиуме...")
+    
+    text = f"""Откройте уникальные возможности: [ ](https://i.ibb.co/wZ61gwPk/IMG-20251216-230901-226.jpg)
+
+• Установить себе кастомное фото
+• Поставить ссылку на свой канал
+• Получать уведомления о проверках
+Все эти фишки входят в WARD Premium
+"""
+    
+    buttons = [
+        [Button.url("💰 Оплата", "https://t.me/XOMTG")],
+        [Button.inline("↩ Скрыть", b"hide_message")]
+    ]
+    
+    await loading_message.delete()
+    await send_response(event, text, buttons=buttons, link_preview=True)
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^\+спасибо'))
+async def thank_command(event):
+    """Обработчик команды +спасибо"""
+    user_id = event.sender_id
+    user_role = db.get_user_role(user_id)
+    
+    # Проверка прав
+    allowed_roles = [6, 8, 10, 11, 9]
+    if user_role not in allowed_roles:
+        return
+    
+    # Получаем целевого пользователя
+    if event.reply_to_msg_id:
+        reply_message = await event.get_reply_message()
+        target_user_id = reply_message.sender_id
+        
+        # Проверяем роль целевого пользователя
+        target_user_role = db.get_user_role(target_user_id)
+        if target_user_role in [1, 6, 8, 9, 10, 11]:
+            return
+    else:
+        return
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(target_user_id):
+        db.add_user(target_user_id, None)
+    
+    # Увеличиваем счетчик скаммеров
+    db.increment_scammers_count(target_user_id)
+    
+    await send_response(
+        event,
+        f"📛 Хорошо!, вы успешно выдали +1 слитого скаммера пользователю с ID {target_user_id}.\n\n"
+        "📈 Спасибо, что боретесь со скамом вместе с WARD ANTISCAM.\n\n"
+        "☕ Если у вас есть ещё скаммеры, сообщите об этом нашим стажёрам или администраторам, "
+        "и они занесут скаммера в базу!"
+    )
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^/on$'))
+async def enable_chat(event):
+    """Включение чата"""
+    user_id = event.sender_id
+    if db.get_user_role(user_id) != 10:
+        return await send_response(event, "❌ У вас нет прав для выполнения этой команды.")
+    
+    try:
+        await bot.edit_permissions(event.chat_id, send_messages=True)
+        await send_response(
+            event,
+            "🔓 Чат открыт, вы снова можете писать сообщения в чат!"
+            "[⠀](https://i.ibb.co/JFq2r3Dg/image.jpg)",
+            link_preview=True
+        )
+    except Exception as e:
+        logger.error(f"Ошибка включения чата: {e}")
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^/off$'))
+async def disable_chat(event):
+    """Отключение чата"""
+    user_id = event.sender_id
+    if db.get_user_role(user_id) != 10:
+        return await send_response(event, "❌ У вас нет прав для выполнения этой команды.")
+    
+    try:
+        await bot.edit_permissions(event.chat_id, send_messages=False)
+        await send_response(
+            event,
+            "🔒 Чат закрыт на время, скоро мы вернёмся в строй, следите за новостями!"
+            "[⠀](https://i.ibb.co/JFq2r3Dg/image.jpg)",
+            link_preview=True
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отключения чата: {e}")
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^админы!$'))
+async def call_admins(event):
+    """Вызов админов"""
+    user_id = event.sender_id
+    current_time = datetime.now()
+    
+    # Проверка кулдауна
+    if user_id in admin_cooldowns:
+        time_diff = current_time - admin_cooldowns[user_id]
+        if time_diff < timedelta(hours=4):
+            remaining = timedelta(hours=4) - time_diff
+            hours = remaining.seconds // 3600
+            minutes = (remaining.seconds % 3600) // 60
+            return await send_response(
+                event,
+                f"**⏳ Подождите {hours} ч. {minutes} мин. прежде чем снова вызывать админов!**"
+            )
+    
+    admin_cooldowns[user_id] = current_time
+    
+    # Получаем админов из БД
+    admins = []
+    for role_id in [6, 7, 8, 9, 10]:
+        db.cursor.execute('SELECT user_id FROM users WHERE role_id = ?', (role_id,))
+        admins.extend([row[0] for row in db.cursor.fetchall()])
+    
+    mentions_text = "**✅ Админы вызваны!**"
+    for admin_id in admins:
+        mentions_text += f"[\u200b](tg://user?id={admin_id})"
+        
+        # Отправляем уведомление админам
+        try:
+            caller = await event.get_sender()
+            caller_mention = f"@{caller.username}" if caller.username else caller.mention
+            await bot.send_message(
+                admin_id,
+                f"**🚨 В чате пользователь {caller_mention} вызывает админов!**"
+            )
+        except:
+            pass
+    
+    await send_response(event, mentions_text)
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^гаранты!$'))
+async def call_guarantors(event):
+    """Вызов гарантов"""
+    user_id = event.sender_id
+    current_time = datetime.now()
+    
+    # Проверка кулдауна
+    if user_id in guarantor_cooldowns:
+        time_diff = current_time - guarantor_cooldowns[user_id]
+        if time_diff < timedelta(hours=1):
+            remaining = timedelta(hours=1) - time_diff
+            hours = remaining.seconds // 3600
+            minutes = (remaining.seconds % 3600) // 60
+            return await send_response(
+                event,
+                f"**⏳ Подождите {hours} ч. {minutes} мин. прежде чем снова вызывать гарантов!**"
+            )
+    
+    guarantor_cooldowns[user_id] = current_time
+    
+    # Получаем гарантов
+    guarantors = db.get_guarantors()
+    
+    mentions_text = "**🔰 Гаранты вызваны!**"
+    for guarantor_id in guarantors:
+        mentions_text += f"[\u200b](tg://user?id={guarantor_id})"
+        
+        # Отправляем уведомление гарантам
+        try:
+            caller = await event.get_sender()
+            caller_mention = f"@{caller.username}" if caller.username else caller.mention
+            await bot.send_message(
+                guarantor_id,
+                f"**🚨 В чате пользователь {caller_mention} вызывает гарантов!**"
+            )
+        except:
+            pass
+    
+    await send_response(event, mentions_text)
+
+
+@bot.on(events.NewMessage(pattern=r'/профиль'))
+async def profile_command(event):
+    """Команда профиля"""
+    user = await event.get_sender()
+    user_id = user.id
+    
+    if not db.user_exists(user_id):
+        db.add_user(user_id, user.username)
+    
+    role_id = db.get_user_role(user_id)
+    role_info = ROLES[role_id]
+    checks_count = db.get_check_count(user_id)
+    
+    scammers_slept = 0
+    if role_id in [6, 7, 8, 9, 10]:
+        scammers_slept = db.get_user_scammers_slept(user_id)
+    
+    premium_expiry = db.get_premium_expiry(user_id)
+    is_premium = premium_expiry is not None and datetime.strptime(premium_expiry, "%Y-%m-%d %H:%M:%S") > datetime.now()
+    premium_status = "✅" if is_premium else "❌"
+    
+    profile_text = f"""
+**👤 Профиль пользователя:** [{user.first_name}](tg://user/{user_id})
+
+🔍 **Вас проверяли:** `{checks_count}` раз
+🔥 **Скаммеров слито:** `{scammers_slept}`
+**📝 Роль в базе:** {role_info['name']}
+**WARD Премиум:** {premium_status}
+[⠀](https://i.ibb.co/QF3TxtWG/temp-5173733679-1333.jpg)
+"""
+    
+    await send_response(event, profile_text, link_preview=True)
+
+
+@bot.on(events.NewMessage(pattern=r'/help'))
+async def help_cmd(event):
+    """Команда помощи"""
+    help_text = """
+🤖 **Команды бота WARD ANTISCAM:**
+
+📋 **Проверка пользователей:**
+• `чек [юзернейм/ID]` - проверить пользователя
+• `чек` (ответом на сообщение) - проверить пользователя
+• `чек ми/я/себя` - проверить себя
+
+👮‍♂️ **Выдача ролей:**
+• `+стажер` (ответом) - выдать роль стажера  
+• `+админ` (ответом) - выдать роль админа
+• `+директор` (ответом) - выдать роль директора
+• `+президент` (ответом) - выдать роль президента 
+• `+создатель` (ответом) - выдать роль создателя
+• `+кодер` (ответом) - выдать роль кодера
+• `+гарант` (ответом) - выдать роль гаранта
+
+🔄 **Снятие ролей:**
+• `-стажер` (ответом) - снять роль стажера
+• `-админ` (ответом) - снять роль админа  
+• `-директор` (ответом) - снять роль директора
+• `-президент` (ответом) - снять роль президента
+• `-создатель` (ответом) - снять роль создателя  
+• `-кодер` (ответом) - снять роль кодера
+• `-гарант` (ответом) - снять роль гаранта
+
+⚠️ **Примечание:**
+Команды выдачи и снятия ролей доступны только создателю и кодеру!
+
+🎯 **Другие команды:**
+• `/траст @username` - выдать траст пользователю
+• `/untrust @username` - снять траст
+• `/скам @username причина` - добавить скаммера
+• `/unscam @username` - снять статус скаммера
+• `/профиль` - ваш профиль
+• `/гаранты` - список онлайн гарантов
+• `админы!` - вызвать админов
+• `гаранты!` - вызвать гарантов
+"""
+    await send_response(event, help_text)
+
+
+@bot.on(events.NewMessage(pattern=r'/unscam|анскам'))
+async def unscam_handler(event):
+    """Обработчик снятия статуса скамера"""
+    # Проверяем права
+    user_role = db.get_user_role(event.sender_id)
+    if event.sender_id not in OWNER_ID and user_role not in [6, 8, 10, 11]:
+        return await send_response(event, "❌ Только администраторы могут использовать эту команду")
+    
+    # Получаем целевого пользователя
+    if event.is_reply:
+        replied = await event.get_reply_message()
+        target = await event.client.get_entity(replied.sender_id)
+    else:
+        args = event.raw_text.split()
+        if len(args) < 2:
+            return await send_response(event, "❌ Используй: /unscam @username или ответом на сообщение")
+        try:
+            target = await event.client.get_entity(args[1])
+        except:
+            return await send_response(event, "❌ Не могу найти чела")
+    
+    # Проверяем текущий статус
+    current_role = db.get_user_role(target.id)
+    if current_role not in [2, 3, 4, 5]:
+        return await send_response(event, "ℹ️ У человека нет статуса скаммера")
+    
+    # Снимаем статус
+    db.update_role(target.id, 0)
+    db.remove_scammer_status(target.id)
+    
+    await send_response(
+        event,
+        f"✅ Статус скаммера снят с пользователя [{target.first_name}](tg://user/{target.id})"
+    )
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^продать (.+)'))
+async def sell_command(event):
+    """Команда продажи"""
+    user_id = event.sender_id
+    item_to_sell = event.pattern_match.group(1)
+    
+    # Проверка колдауна
+    current_time = time.time()
+    if user_id in last_check_time:
+        if current_time - last_check_time[user_id] < 10:
+            await send_response(event, "Потерпи брадок, 10 секунд не так уж и много.")
+            return
+    
+    last_check_time[user_id] = current_time
+    
+    # Шанс на успех (15%)
+    if random.randint(1, 100) <= 15:
+        success_texts = [
+            f"ЁЁЁЁЁЁУУУУУУУУУ😎😎😎 Да ты своего {item_to_sell} продал цыганам за 5 копеек!",
+            f"Нихуя себе какой важный хуй бумажный🎴, ты продал своего {item_to_sell} на органы!",
+            f"О!, а куда это твой {item_to_sell} делся? Кажись его цыгани спиздили!"
+        ]
+        await send_response(event, random.choice(success_texts))
+    else:
+        losses = random.randint(1, 10)
+        response_texts = [
+            f"БЛЯЯЯЯЯЯЯЯЯЯЯ😭😭 Ты проебал своего {item_to_sell} в казик, кажись его логи схавали.\n\nВсего ты проебал {losses}.",
+            f"АХХХПАХХАХАХАПХПАХАПХ ЕБАТЬ ТЫ ЛОХ🤣🤣, Ты где-то проебал {item_to_sell}!\n\nВсего проёбано {losses}.",
+            f"Лелелелелеле😑, тебе чё занятся нехуй? своего {item_to_sell} на базаре продавать.\n\nВсего проёбано {losses}."
+        ]
+        
+        response_message = random.choice(response_texts)
+        buttons = [
+            [Button.inline("🔍Искать ещё раз!", f"search_again_{user_id}"),
+             Button.inline("🤑Гойда продадим что-то?", f"sell_something_{user_id}")]
+        ]
+        
+        await send_response(event, response_message, buttons=buttons)
+
+
+@bot.on(events.NewMessage(pattern=r'/добавить|/add'))
+async def add_description_handler(event):
+    """Добавление описания"""
+    user_role = db.get_user_role(event.sender_id)
+    if event.sender_id not in OWNER_ID and user_role not in [6, 8, 10, 11]:
+        return await send_response(event, "❌ Только администраторы могут использовать эту команду")
+    
+    args = event.raw_text.split(maxsplit=2)
+    if len(args) < 3:
+        return await send_response(event, "❌ Используйте: /add @username описание")
+    
+    target_username = args[1]
+    description = args[2]
+    
+    try:
+        if target_username.startswith('@'):
+            target_username = target_username[1:]
+        target = await event.client.get_entity(target_username)
+    except:
+        return await send_response(event, "❌ Не могу найти указанного пользователя")
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(target.id):
+        db.add_user(target.id, target.username)
+    
+    # Обновляем описание
+    db.update_description(target.id, description)
+    
+    await send_response(
+        event,
+        f"✅ Описание для пользователя [{target.first_name}](tg://user/{target.id}) обновлено: {description}"
+    )
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^/гаранты$'))
+async def list_online_garants(event):
+    """Список онлайн гарантов"""
+    await send_response(event, "Ищу онлайн гарантов...")
+    
+    # Получаем гарантов
+    guarantors = db.get_guarantors()
+    
+    online_garants = []
+    for uid in guarantors:
+        try:
+            user = await bot.get_entity(uid)
+            if user.status is None or user.status == "online" or isinstance(user.status, UserStatusRecently):
+                online_garants.append(user)
+        except:
+            continue
+    
+    if not online_garants:
+        return await send_response(event, "На данный момент онлайн гарантов нет ⛔")
+    
+    text = "📊 Вот наш список онлайн гарантов:\n"
+    buttons = []
+    for user in online_garants[:20]:
+        buttons.append([Button.inline(f"🛡️ {user.first_name}", f"check_{user.id}")])
+    
+    await send_response(event, text, buttons=buttons, link_preview=True)
+
+
+@bot.on(events.NewMessage(pattern=r'/оффтоп'))
+async def handle_offtopic_command(event):
+    """Обработчик оффтопа"""
+    allowed_roles = [1, 6, 7, 8, 9, 10]
+    if event.sender_id not in OWNER_ID and db.get_user_role(event.sender_id) not in allowed_roles:
+        return await send_response(event, "❌ У вас нет прав для использования этой команды.")
+    
+    if not event.is_group and not event.is_channel:
+        return await send_response(event, "❌ Эта команда доступна только в группах и каналах.")
+    
+    if event.is_reply:
+        replied = await event.get_reply_message()
+        target_user = await event.client.get_entity(replied.sender_id)
+        
+        # Проверяем права
+        can_moderate, reason = await can_use_moderation(event.chat_id, event.sender_id)
+        if not can_moderate:
+            return await send_response(event, f"❌ {reason}")
+        
+        try:
+            # Выдаем мут на 30 минут
+            success, message = await mute_user_in_chat(
+                event.chat_id,
+                target_user.id,
+                duration_minutes=30,
+                reason="Оффтоп"
+            )
+            
+            if success:
+                mute_message = (
+                    f"{target_user.first_name} выдан мут на 30 минут\n\n"
+                    f"Причина: Оффтоп\n\n"
+                    f"общайтесь в нашем чате для оффтопа☕"
+                )
+                
+                keyboard = [[Button.url("Перейти", "https://t.me/WARDREPORT")]]
+                await send_response(event, mute_message, buttons=keyboard)
+                await replied.delete()
+            else:
+                await send_response(event, f"❌ {message}")
+        except Exception as e:
+            await send_response(event, f"❌ Не могу выдать мут: {e}")
+    else:
+        await send_response(event, "❌ Ответьте на сообщение пользователя, которому нужно выдать мут.")
+
+
+@bot.on(events.NewMessage(pattern=r'/магазин'))
+async def shop_handler(event):
+    """Магазин"""
+    user_id = event.sender_id
+    balance = db.get_premium_points(user_id)
+    
+    if balance == 0:
+        db.add_premium_points(user_id, 1000)
+        balance = 1000
+    
+    buttons = [
+        [Button.inline("Прем 1д (10 коинов)", data="buy_premium_1d")],
+        [Button.inline("Прем 1н (50 коинов)", data="buy_premium_7d")],
+        [Button.inline("Прем 1м (125 коинов)", data="buy_premium_30d")],
+        [Button.inline("Отдых 1д (100 коинов)", data="buy_rest_1d")],
+        [Button.inline(f"Сумма: {balance} очков")]
+    ]
+    
+    await send_response(event, "Добро пожаловать в магазин WARD ANTISCAM!", buttons=buttons)
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^(/|\.)?(mute|мут)(@\w+)?\s*(\d+[дмчh])\s*(.*)'))
+async def mute_handler(event):
+    """Мут пользователя"""
+    username = event.pattern_match.group(3)
+    replied = await event.get_reply_message() if not username else None
+    
+    if username:
+        try:
+            user = await bot.get_entity(username)
+        except:
+            return await send_response(event, "⚠️ **Не удалось найти пользователя**")
+    elif replied:
+        user = await replied.get_sender()
+    else:
+        return await send_response(event, "⚠️ **Команда должна быть ответом на сообщение пользователя или содержать @username**")
+    
+    # Проверяем возможность использования модерации
+    can_moderate, reason = await can_use_moderation(event.chat_id, event.sender_id)
+    if not can_moderate:
+        return await send_response(event, f"⛔️ **{reason}**")
+    
+    args = event.pattern_match
+    time_str = args.group(4).lower()
+    reason_text = args.group(5) or "Не указана"
+    
+    duration_match = re.match(r"(\d+)([дмчh])", time_str)
+    if not duration_match:
+        return await send_response(
+            event,
+            "⚠️ **Неверный формат времени**\n\n"
+            "**Примеры:**\n"
+            "30м - 30 минут\n"
+            "2ч - 2 часа\n"
+            "1д - 1 день"
+        )
+    
+    amount = int(duration_match.group(1))
+    unit = duration_match.group(2)
+    
+    if unit in ["м", "m"]:
+        duration_minutes = amount
+        duration_text = f"{amount} минут"
+    elif unit in ["ч", "h"]:
+        duration_minutes = amount * 60
+        duration_text = f"{amount} часов"
+    elif unit in ["д", "d"]:
+        duration_minutes = amount * 1440
+        duration_text = f"{amount} дней"
+    else:
+        return await send_response(event, "⚠️ **Неверная единица времени**")
+    
+    success, message = await mute_user_in_chat(
+        event.chat_id,
+        user.id,
+        duration_minutes=duration_minutes,
+        reason=reason_text
+    )
+    
+    if success:
+        mute_text = f"📛 **Пользователю {user.first_name} (`{user.id}`) был выдан мут на {duration_text}!**"
+        
+        keyboard = [
+            [Button.inline("🕐 Снять мут", f"unmute_{user.id}")],
+            [Button.url("👓 Чат для оффтопа", "https://t.me/WARDREPORT")],
+            [Button.url("📋 Логи", LOG_CHANNEL)]
+        ]
+        
+        await send_response(event, mute_text, buttons=keyboard)
+    else:
+        await send_response(event, f"❌ **Ошибка:** {message}")
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^(/|\.)?(unmute|анмут)(@\w+)?'))
+async def unmute_handler(event):
+    """Размут пользователя"""
+    username = event.pattern_match.group(3)
+    replied = await event.get_reply_message() if not username else None
+    
+    if username:
+        try:
+            user = await bot.get_entity(username)
+        except:
+            return await send_response(event, "⚠️ **Не удалось найти пользователя**")
+    elif replied:
+        user = await replied.get_sender()
+    else:
+        return await send_response(event, "⚠️ **Команда должна быть ответом на сообщение пользователя или содержать @username**")
+    
+    # Проверяем возможность использования модерации
+    can_moderate, reason = await can_use_moderation(event.chat_id, event.sender_id)
+    if not can_moderate:
+        return await send_response(event, f"⛔️ **{reason}**")
+    
+    success, message = await unmute_user_in_chat(event.chat_id, user.id)
+    
+    if success:
+        unmute_text = f"🔊 **Пользователь {user.first_name} размучен!**\n\n👤 **Снял мут:** {event.sender.first_name}"
+        
+        keyboard = [
+            [Button.url("👑 Чат для оффтопа", "https://t.me/WARDREPORT")],
+            [Button.url("📋 Логи", LOG_CHANNEL)]
+        ]
+        
+        await send_response(event, unmute_text, buttons=keyboard)
+    else:
+        await send_response(event, f"❌ **Ошибка:** {message}")
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^(/|\.)?(ban|бан)(@\w+)?\s*(\d+[дмчh])\s*(.*)'))
+async def ban_handler(event):
+    """Бан пользователя"""
+    username = event.pattern_match.group(3)
+    replied = await event.get_reply_message() if not username else None
+    
+    if username:
+        try:
+            user = await bot.get_entity(username)
+        except:
+            return await send_response(event, "⚠️ **Не удалось найти пользователя**")
+    elif replied:
+        user = await replied.get_sender()
+    else:
+        return await send_response(event, "⚠️ **Команда должна быть ответом на сообщение пользователя или содержать @username**")
+    
+    # Проверяем возможность использования модерации
+    can_moderate, reason = await can_use_moderation(event.chat_id, event.sender_id)
+    if not can_moderate:
+        return await send_response(event, f"⛔️ **{reason}**")
+    
+    args = event.pattern_match
+    time_str = args.group(4).lower()
+    reason_text = args.group(5) or "Не указана"
+    
+    duration_match = re.match(r"(\d+)([дмчh])", time_str)
+    if not duration_match:
+        return await send_response(
+            event,
+            "⚠️ **Неверный формат времени**\n\n"
+            "**Примеры:**\n"
+            "30м - 30 минут\n"
+            "2ч - 2 часа\n"
+            "1д - 1 день"
+        )
+    
+    amount = int(duration_match.group(1))
+    unit = duration_match.group(2)
+    
+    if unit in ["м", "m"]:
+        duration_minutes = amount
+        duration_text = f"{amount} минут"
+    elif unit in ["ч", "h"]:
+        duration_minutes = amount * 60
+        duration_text = f"{amount} часов"
+    elif unit in ["д", "d"]:
+        duration_minutes = amount * 1440
+        duration_text = f"{amount} дней"
+    
+    success, message = await ban_user_in_chat(
+        event.chat_id,
+        user.id,
+        duration_minutes=duration_minutes,
+        reason=reason_text
+    )
+    
+    if success:
+        ban_text = f"📛 **Пользователю {user.first_name} (`{user.id}`) выдан бан на {duration_text}!**\n📝 **Причина:** {reason_text}"
+        
+        keyboard = [
+            [Button.inline("🔓 Снять бан", f"unban_{user.id}")],
+            [Button.url("💭 Чат для оффтопа", "https://t.me/WARDREPORT")],
+            [Button.url("📋 Логи", LOG_CHANNEL)]
+        ]
+        
+        await send_response(event, ban_text, buttons=keyboard)
+    else:
+        await send_response(event, f"❌ **Ошибка:** {message}")
+
+
+@bot.on(events.NewMessage(pattern=r'(?i)^(/|\.)?(unban|разбан)(@\w+)?'))
+async def unban_handler(event):
+    """Разбан пользователя"""
+    username = event.pattern_match.group(3)
+    replied = await event.get_reply_message() if not username else None
+    
+    if username:
+        try:
+            user = await bot.get_entity(username)
+        except:
+            return await send_response(event, "⚠️ **Не удалось найти пользователя**")
+    elif replied:
+        user = await replied.get_sender()
+    else:
+        return await send_response(event, "⚠️ **Команда должна быть ответом на сообщение пользователя или содержать @username**")
+    
+    # Проверяем возможность использования модерации
+    can_moderate, reason = await can_use_moderation(event.chat_id, event.sender_id)
+    if not can_moderate:
+        return await send_response(event, f"⛔️ **{reason}**")
+    
+    success, message = await unban_user_in_chat(event.chat_id, user.id)
+    
+    if success:
+        unban_text = f"💫 **Пользователь {user.first_name} (`{user.id}`) разбанен!**\n👮 **Снял бан:** {event.sender.first_name}"
+        
+        keyboard = [
+            [Button.url("💭 Чат для оффтопа", "https://t.me/WARDREPORT")],
+            [Button.url("📋 Логи", LOG_CHANNEL)]
+        ]
+        
+        await send_response(event, unban_text, buttons=keyboard)
+    else:
+        await send_response(event, f"❌ **Ошибка:** {message}")
+
+
+# ========== ОБРАБОТЧИКИ CALLBACK ==========
+
+@bot.on(events.CallbackQuery(data=b"hide_message"))
+async def hide_message_handler(event):
+    """Скрытие сообщения"""
+    try:
+        await event.delete()
+    except:
+        pass
+
+
+@bot.on(events.CallbackQuery(pattern=r'mark_(scammer|possible|suspect|rooster)_(\d+)_(.+)'))
+async def mark_user_handler(event):
+    """Обработчик выбора роли для скаммера"""
+    role_type = event.pattern_match.group(1)
+    user_id = int(event.pattern_match.group(2))
+    
+    role_mapping = {
+        'scammer': 3,
+        'possible': 2,
+        'suspect': 5,
+        'rooster': 4
+    }
+    
+    # Проверка прав
+    user_role = db.get_user_role(event.sender_id)
+    if user_role not in [1, 6, 8, 10, 11, 9] and event.sender_id not in OWNER_ID:
+        return await event.answer("⛔ У вас нет прав!", alert=True)
+    
+    # Обновление роли
+    db.update_role(user_id, role_mapping[role_type])
+    
+    # Увеличиваем счетчик скаммеров для того, кто отметил
+    db.increment_scammers_count(event.sender_id)
+    scammers_slept = db.get_user_scammers_slept(event.sender_id)
+    
+    await event.answer(f"✅ Роль установлена! Скаммеров слито: {scammers_slept}", alert=True)
+    await event.delete()
+
+
+@bot.on(events.CallbackQuery(pattern='about_project'))
+async def about_project(event):
+    """О проекте"""
+    about_text = (
+        "Мы - глобальная антискам база WARD ANTISCAM. "
+        "Наш персонал помогает комьюнити бороться со скамом. "
+        "Если у вас есть вопросы, пишите, с радостью поможем🤗"
+        "[⠀](https://i.ibb.co/S40fy8Kx/temp-5173733679-1327.jpg)"
+    )
+    
+    buttons = [
+        [Button.inline("🤔 Как стать гарантом?", "how_to_become_guarantor")],
+        [Button.inline("🤑 У кого и как купить траст?", "how_to_buy_trust")],
+        [Button.inline("😈 Как слить вам скаммера?", "how_to_report_scammer")]
+    ]
+    
+    await event.edit(about_text, buttons=buttons, link_preview=True)
+
+
+@bot.on(events.CallbackQuery(pattern='support_handler'))
+async def support_handler(event):
+    """Поддержка"""
+    support_text = (
+        "Если вы хотите поддержать развитие бота, "
+        "вы можете сделать это следующими способами:\n\n"
+        "TTD ник: **RYWUEEHWI**"
+        "[⠀](https://i.ibb.co/0x7KTr0/image.jpg)"
+    )
+    
+    buttons = [
+        [Button.url("💌 Крипто ботом", "https://t.me/send?start=IVdGVHgwlEsa")],
+        [Button.url("💞 Наш кодер", "https://t.me/XOMTG")]
+    ]
+    
+    await event.edit(support_text, buttons=buttons, link_preview=True)
+
+
+@bot.on(events.CallbackQuery(pattern='creator'))
+async def creator_handler(event):
+    """Информация о создателях"""
+    await event.edit("Информация о создателях:\nСоздатель - @XOMTG\nКодер - @XOMTG")
+
+
+@bot.on(events.CallbackQuery(pattern='add_group'))
+async def add_group_handler(event):
+    """Добавление бота в группу"""
+    url = "https://t.me/WARDANTISCAM_bot?startgroup=newgroup&admin=manage_chat+delete_messages+restrict_members+invite_users+restrict_members+change_info+pin_messages+manage_video_chats"
+    keyboard = types.KeyboardButtonUrl(text="Добавить в группу", url=url)
+    await event.edit("Нажмите кнопку ниже, чтобы добавить бота в группу:", buttons=keyboard)
+
+
+@bot.on(events.CallbackQuery(pattern='report_scammer'))
+async def report_handler(event):
+    """Жалоба на скаммера"""
+    await event.respond(
+        "Для того чтобы пожаловаться на скаммера, перейдите в наш "
+        "[специальный чат](https://t.me/WARDREPORT)\n"
+        "Вам нужны пруфы и скрины переписок!"
+    )
+
+
+@bot.on(events.CallbackQuery(pattern=r'check_(\d+)'))
+async def check_callback_handler(event):
+    """Обработчик проверки по callback"""
+    user_id = int(event.data.decode().split('_')[1])
+    try:
+        user = await bot.get_entity(user_id)
+        user_data = db.get_user(user_id)
+        message_text, buttons = await get_user_profile_response(event, user, user_data)
+        await event.respond(message_text, buttons=buttons, link_preview=True)
+    except:
+        await event.answer("❌ Не удалось получить информацию о пользователе", alert=True)
+
+
+@bot.on(events.CallbackQuery(pattern='check_soon'))
+async def check_soon_handler(event):
+    """Проверить себя через callback"""
+    user = await event.client.get_entity(event.sender_id)
+    user_id = user.id
+    
+    # Получаем данные пользователя
+    user_data = db.get_user(user_id)
+    role_id = db.get_user_role(user_id)
+    role_info = ROLES[role_id]
+    
+    checks_count = db.get_check_count(user_id)
+    current_time = datetime.now()
+    
+    custom_photo = db.get_user_custom_photo(user_id)
+    preview_url = custom_photo if custom_photo else role_info['preview_url']
+    
+    response = (
+        f"👤 | Пользователь: [{user.first_name}](tg://user/{user.id})\n\n"
+        f"🔍 | ID: `{user.id}`\n\n"
+        f"🤗 | Роль в базе: {role_info['name']}\n\n"
+        f"⚖ | Шанс скама: {role_info['scam_chance']}%\n\n"
+        f"📅 {current_time.strftime('%d.%m.%Y')} | 🔍 {checks_count}\n\n"
+        f"[Просмотреть медиа]({preview_url})"
+    )
+    
+    buttons = [
+        [
+            Button.url("👤 Профиль", f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"),
+            Button.url("🔗 Ссылка", f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}")
+        ],
+        [
+            Button.url("⚠️ Слить скаммера", "https://t.me/WARDREPORT"),
+            Button.inline("⚖️ Аппеляция", "appeal")
+        ]
+    ]
+    
+    await event.edit(response, buttons=buttons)
+
+
+@bot.on(events.CallbackQuery(pattern='country_soon'))
+async def country_soon_handler(event):
+    """Выбор страны"""
+    countries = [
+        "США 🇺🇸", "Канада 🇨🇦", "Мексика 🇲🇽", "Бразилия 🇧🇷",
+        "Аргентина 🇦🇷", "Великобритания 🇬🇧", "Франция 🇫🇷",
+        "Германия 🇩🇪", "Италия 🇮🇹", "Испания 🇪🇸", "Китай 🇨🇳",
+        "Япония 🇯🇵", "Австралия 🇦🇺", "Индия 🇮🇳", "Россия 🇷🇺"
+    ]
+    
+    buttons = [Button.inline(country, f"set_country_{i}") for i, country in enumerate(countries)]
+    
+    await event.respond(
+        "🌍 Выберите страну, выбранная вами страна будет стоять у вас в профиле!",
+        buttons=[buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    )
+
+
+@bot.on(events.CallbackQuery(pattern=r'set_country_(\d+)'))
+async def set_country_handler(event):
+    """Установка страны"""
+    country_idx = int(event.data.decode().split('_')[2])
+    countries = [
+        "США 🇺🇸", "Канада 🇨🇦", "Мексика 🇲🇽", "Бразилия 🇧🇷",
+        "Аргентина 🇦🇷", "Великобритания 🇬🇧", "Франция 🇫🇷",
+        "Германия 🇩🇪", "Италия 🇮🇹", "Испания 🇪🇸", "Китай 🇨🇳",
+        "Япония 🇯🇵", "Австралия 🇦🇺", "Индия 🇮🇳", "Россия 🇷🇺"
+    ]
+    
+    country = countries[country_idx]
+    user_id = event.sender_id
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(user_id):
+        db.add_user(user_id, None)
+    
+    db.update_user(user_id, country=country)
+    await event.answer(f"✅ Страна установлена: {country}", alert=True)
+
+
+@bot.on(events.CallbackQuery(pattern='channel_soon'))
+async def channel_soon_handler(event):
+    """Установка канала"""
+    user_id = event.sender_id
+    
+    # Проверка премиум-статуса
+    if not db.is_premium_user(user_id):
+        return await event.answer(
+            "❌ У вас нет премиум статуса! Для установки канала приобретите премиум.",
+            alert=True
+        )
+    
+    await event.respond("Отправьте username канала (например, @channelname)")
+    
+    @bot.on(events.NewMessage(from_users=user_id))
+    async def channel_handler(channel_event):
+        channel_name = channel_event.text.strip()
+        if not channel_name.startswith('@'):
+            await channel_event.reply("❌ Имя канала должно начинаться с @")
+        elif len(channel_name) > 32:
+            await channel_event.reply("❌ Имя канала слишком длинное (макс. 32 символа)")
+        else:
+            db.update_user(channel_event.sender_id, channel=channel_name)
+            await channel_event.reply(f"✅ Канал {channel_name} успешно сохранен!")
+        bot.remove_event_handler(channel_handler)
+
+
+@bot.on(events.CallbackQuery(pattern='custom_soon'))
+async def custom_soon_handler(event):
+    """Установка кастомного фото"""
+    user_id = event.sender_id
+    
+    # Проверка премиум-статуса
+    if not db.is_premium_user(user_id):
+        return await event.answer(
+            "❌ У вас нет премиум статуса! Для установки кастомного фото приобретите премиум.",
+            alert=True
+        )
+    
+    await event.respond("Отправьте изображение или видео")
+    
+    @bot.on(events.NewMessage(from_users=user_id))
+    async def media_handler(media_event):
+        if media_event.photo or media_event.video:
+            try:
+                media_path = await bot.download_media(media_event.photo or media_event.video)
+                
+                if media_event.photo:
+                    with open(media_path, "rb") as image_file:
+                        files = {"image": image_file}
+                        params = {"key": IMG_API_KEY}
+                        response = requests.post(
+                            "https://api.imgbb.com/1/upload",
+                            params=params,
+                            files=files
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                    
+                    os.remove(media_path)
+                    
+                    if data.get("success") and "data" in data and "url" in data["data"]:
+                        image_url = data["data"]["url"]
+                        db.cursor.execute(
+                            'UPDATE users SET custom_photo_url = ? WHERE user_id = ?',
+                            (image_url, user_id)
+                        )
+                        db.conn.commit()
+                        await media_event.reply(f"✅ Кастомное изображение успешно установлено!")
+                    else:
+                        await media_event.reply("❌ Не удалось получить URL изображения.")
+                
+                elif media_event.video:
+                    video_url = f"https://t.me/WARDANTISCAM_bot?start=video_{media_event.video.id}"
+                    db.cursor.execute(
+                        'UPDATE users SET custom_photo_url = ? WHERE user_id = ?',
+                        (video_url, user_id)
+                    )
+                    db.conn.commit()
+                    await media_event.reply(f"✅ Кастомное видео успешно установлено!")
+            
+            except Exception as e:
+                await media_event.reply(f"❌ Произошла ошибка: {str(e)}")
+        else:
+            await media_event.reply("❌ Пожалуйста, отправьте изображение или видео.")
+        
+        bot.remove_event_handler(media_handler)
+
+
+@bot.on(events.CallbackQuery(pattern='remove_custom'))
+async def remove_custom_handler(event):
+    """Удаление кастомного фото"""
+    user_id = event.sender_id
+    db.cursor.execute('UPDATE users SET custom_photo_url = NULL WHERE user_id = ?', (user_id,))
+    db.conn.commit()
+    await event.answer("✅ Кастомное изображение успешно удалено.", alert=True)
+
+
+@bot.on(events.CallbackQuery(pattern=r'buy_(premium|rest)_(\d+)([днм])'))
+async def purchase_handler(event):
+    """Покупка в магазине"""
+    action = event.pattern_match.group(1)
+    amount = int(event.pattern_match.group(2))
+    unit = event.pattern_match.group(3)
+    
+    user_id = event.sender_id
+    balance = db.get_premium_points(user_id)
+    
+    cost_mapping = {
+        'premium_1д': 10,
+        'premium_7д': 50,
+        'premium_30д': 125,
+        'rest_1д': 100
+    }
+    
+    data_str = event.data.decode('utf-8')
+    cost = cost_mapping.get(data_str)
+    
+    if not cost:
+        return await event.answer("Неизвестная команда.", alert=True)
+    
+    if balance >= cost:
+        db.add_premium_points(user_id, -cost)
+        
+        if action == 'premium':
+            if unit == 'д':
+                days = amount
+            elif unit == 'н':
+                days = amount * 7
+            elif unit == 'м':
+                days = amount * 30
+            
+            expiry_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+            db.add_premium(user_id, expiry_date)
+            await event.answer(f"✅ Премиум на {amount}{unit} успешно приобретен!", alert=True)
+        else:
+            await event.answer("✅ Отдых успешно приобретен!", alert=True)
+    else:
+        await event.answer("❌ У вас недостаточно коинов!", alert=True)
+
+
+@bot.on(events.CallbackQuery(pattern=r'search_again_(\d+)'))
+async def search_again_handler(event):
+    """Поиск снова"""
+    await event.answer("Да мне лень работать чё-то🥱🥱", alert=True)
+
+
+@bot.on(events.CallbackQuery(pattern=r'sell_something_(\d+)'))
+async def sell_something_handler(event):
+    """Продать что-то"""
+    await event.answer("Напиши 'продать (что-то твоё)'", alert=True)
+
+
+@bot.on(events.CallbackQuery(pattern=r'unmute_(\d+)'))
+async def unmute_callback_handler(event):
+    """Размут через callback"""
+    user_id = int(event.data.decode().split('_')[1])
+    
+    can_moderate, reason = await can_use_moderation(event.chat_id, event.sender_id)
+    if not can_moderate:
+        return await event.answer(f"⛔️ {reason}", alert=True)
+    
+    success, message = await unmute_user_in_chat(event.chat_id, user_id)
+    
+    if success:
+        await event.answer("✅ Пользователь размучен!", alert=True)
+        await event.delete()
+    else:
+        await event.answer(f"❌ {message}", alert=True)
+
+
+@bot.on(events.CallbackQuery(pattern=r'unban_(\d+)'))
+async def unban_callback_handler(event):
+    """Разбан через callback"""
+    user_id = int(event.data.decode().split('_')[1])
+    
+    can_moderate, reason = await can_use_moderation(event.chat_id, event.sender_id)
+    if not can_moderate:
+        return await event.answer(f"⛔️ {reason}", alert=True)
+    
+    success, message = await unban_user_in_chat(event.chat_id, user_id)
+    
+    if success:
+        await event.answer("✅ Пользователь разбанен!", alert=True)
+        await event.delete()
+    else:
+        await event.answer(f"❌ {message}", alert=True)
+
+
+@bot.on(events.CallbackQuery(pattern=r'ban_(\d+)'))
+async def ban_callback_handler(event):
+    """Бан через callback"""
+    user_id = int(event.data.decode().split('_')[1])
+    
+    can_moderate, reason = await can_use_moderation(event.chat_id, event.sender_id)
+    if not can_moderate:
+        return await event.answer(f"⛔️ {reason}", alert=True)
+    
+    success, message = await ban_user_in_chat(event.chat_id, user_id, duration_minutes=1440)
+    
+    if success:
+        await event.answer("✅ Пользователь забанен на 24 часа!", alert=True)
+        await event.delete()
+    else:
+        await event.answer(f"❌ {message}", alert=True)
+
+
+@bot.on(events.CallbackQuery(data=b"top_trainees"))
+async def top_trainees_handler(event):
+    """Топ стажеров"""
+    try:
+        top_trainees = db.cursor.execute('''
+            SELECT user_id, username, scammers_slept 
+            FROM users 
+            WHERE role_id = 6 
+            ORDER BY scammers_slept DESC 
+            LIMIT 10
+        ''').fetchall()
+        
+        if not top_trainees:
+            return await event.respond("📭 Список стажеров пока пуст!")
+        
+        response = "🏆 Топ 10 стажеров по слитым скаммерам:\n\n"
+        for i, (user_id, username, count) in enumerate(top_trainees, 1):
+            user_link = f"[{username or f'ID:{user_id}'}](tg://user?id={user_id})"
+            response += f"{i}. {user_link} — 🚫 {count} скаммеров\n"
+        
+        await event.edit(response, parse_mode='Markdown')
+    except Exception as e:
+        await event.respond(f"⚠️ Ошибка: {str(e)}")
+
+
+@bot.on(events.CallbackQuery(data=b"top_day"))
+async def top_day_handler(event):
+    """Топ активных"""
+    day_ago = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
+    
+    try:
+        db.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'")
+        if not db.cursor.fetchone():
+            return await event.respond("⚠️ Таблица сообщений ещё не создана. Активность не отслеживается.")
+        
+        top_users = db.cursor.execute('''
+            SELECT u.user_id, u.username, COUNT(m.id) as count
+            FROM users u
+            JOIN messages m ON u.user_id = m.user_id
+            WHERE m.timestamp > ?
+            GROUP BY u.user_id
+            ORDER BY count DESC
+            LIMIT 10
+        ''', (day_ago,)).fetchall()
+        
+        if not top_users:
+            return await event.respond("📭 Пока нет активности за последние 24 часа!")
+        
+        response = "😎 Топ 10 активных пользователей за 24 часа:\n\n"
+        for i, (user_id, username, count) in enumerate(top_users, 1):
+            username = f"@{username}" if username else f"ID:{user_id}"
+            response += f"{i}. {username} — ✉️ {count} сообщений\n"
+        
+        await event.edit(response)
+    except Exception as e:
+        await event.respond(f"⚠️ Ошибка: {str(e)}")
+
+
+@bot.on(events.CallbackQuery(pattern=r'how_to_(become_guarantor|buy_trust|report_scammer)'))
+async def faq_handler(event):
+    """FAQ ответы"""
+    faq_type = event.pattern_match.group(1)
+    
+    if faq_type == 'become_guarantor':
+        response = (
+            "Чтобы стать гарантом, нужно пройти набор в нашу базу. "
+            "Владельцы регулярно проводят наборы на многие роли, в том числе гарантов. "
+            "Если ты хочешь стать гарантом, просто пройди набор в нашу базу🤗"
+        )
+    elif faq_type == 'buy_trust':
+        response = (
+            "Хочешь купить траст? Да ты богач🤗. Чтобы купить траст, тебе нужно написать нашим гарантам "
+            "Гарантов ты можешь найти в чате или же нажав на кнопку 'Гаранты' в главном меню🤑"
+        )
+    elif faq_type == 'report_scammer':
+        response = (
+            "Ох, тебя тоже задрали скаммеры? Меня тоже😡 Если ты действительно хочешь слить скаммера, "
+            "то тебе нужно зайти в нашу базу и написать в чат доказательства скама и юзернейм-айди. "
+            "Наши волонтёры занесут этого скаммера😈"
+        )
+    
+    await event.respond(response)
+
+
+@bot.on(events.CallbackQuery(pattern='appeal'))
+async def appeal_handler(event):
+    """Апелляция"""
+    await event.answer("Проверьте личные сообщения!", alert=True)
+    await event.client.send_message(
+        event.sender_id,
+        "Если вы хотите обжаловать решение Администрации на счёт заноса вас в базу, вот что вам нужно будет сделать!\n"
+        "1️⃣ Перейти в нашу предложку WARD!\n"
+        "2️⃣ Описать свою проблему и предоставить доказательства того, что вы не обманывали пользователя!\n"
+        "3️⃣ Ожидать ответа от модераторов!\n\n"
+        "Спасибо, что выбрали базу WARD ANTISCAM, мы очень ценим наших пользователей!"
+    )
+
+
+# ========== ОБРАБОТЧИК ЧАТОВ ==========
+
+@bot.on(events.ChatAction)
+async def handle_chat_join(event):
+    """Обработчик входа пользователя в чат"""
+    if not (event.user_joined or event.user_added):
+        return
+    
+    user = await event.get_user()
+    user_id = user.id
+    
+    # Игнорируем ботов
+    if user.bot:
+        return
+    
+    # Кэш от повторов
+    if user_id in joined_users_cache:
+        return
+    joined_users_cache.add(user_id)
+    
+    # Добавляем пользователя в БД если его нет
+    if not db.user_exists(user_id):
+        db.add_user(user_id, user.username)
+    
+    # Получаем роль пользователя
+    user_role = db.get_user_role(user_id)
+    image_url = "https://i.ibb.co/Qvk5DJRY/image.jpg"
+    
+    # Формируем приветствие в зависимости от роли
+    if user_role == 11:  # Кодер
+        text = f"""
+☕ Добро пожаловать! [{user.first_name}](tg://user?id={user.id})
+
+Добро пожаловать!!😊
+[🤗]({image_url})
+"""
+        await event.respond(text, parse_mode='md', link_preview=True)
+    
+    elif user_role in [6, 7, 8, 9, 10]:  # Персонал
+        text = f"""
+☕ Добро пожаловать! [{user.first_name}](tg://user?id={user.id})
+[🤗]({image_url})
+"""
+        await event.respond(text, parse_mode='md', link_preview=True)
+    
+    elif user_role == 12:  # Проверенный гарантом
+        text = f"""
+🔥 К чату присоединился человек, проверенный гарантом WARD ANTISCAM
+[🤗]({image_url})
+"""
+        await event.respond(text, parse_mode='md', link_preview=True)
+    
+    elif user_role == 3:  # Скамер
+        buttons = [[Button.inline("ЗАБАНИТЬ ⛔", f"ban_{user.id}")]]
+        text = f"""
+⚠️ К чату присоединился [{user.first_name}](tg://user?id={user.id}) **Скаммер**!
+
+Не доверяйте этому человеку.
+[🤗]({image_url})
+"""
+        await event.respond(text, buttons=buttons, parse_mode='md', link_preview=True)
+    
+    elif user_role in [2, 4, 5]:  # Подозреваемые
+        buttons = [[Button.inline("ЗАБАНИТЬ ⛔", f"ban_{user.id}")]]
+        text = f"""
+⚠️ К чату присоединился [{user.first_name}](tg://user?id={user.id}) с высоким шансом скама!
+
+Вероятность скама: {ROLES[user_role]['scam_chance']}%
+[🤗]({image_url})
+"""
+        await event.respond(text, buttons=buttons, parse_mode='md', link_preview=True)
+    
+    else:  # Обычный пользователь
+        text = f"""
+👋 Добро пожаловать! [{user.first_name}](tg://user?id={user.id})
+[🤗]({WELCOME_IMAGE})
+"""
+        await event.respond(text, parse_mode='md', link_preview=True)
+    
+    # Очистка кэша через 10 минут
+    async def clear_cache():
+        await asyncio.sleep(600)
+        joined_users_cache.discard(user_id)
+    
+    asyncio.create_task(clear_cache())
+
+
+# ========== ОБРАБОТЧИК СООБЩЕНИЙ ДЛЯ СТАТИСТИКИ ==========
+
+@bot.on(events.NewMessage)
+async def message_handler(event):
+    """Обработчик всех сообщений для статистики и анти-спама"""
+    user_id = event.sender_id
+    
+    # Игнорируем сообщения от ботов
+    if event.sender.bot:
+        return
+    
+    # Обновляем статистику сообщений
+    db.update_total_messages()
+    
+    # Анти-спам система только для групп
+    if event.is_group or event.is_channel:
+        current_time = datetime.now()
+        user_message_count[user_id].append(current_time)
+        
+        # Удаляем старые записи
+        user_message_count[user_id] = [
+            timestamp for timestamp in user_message_count[user_id]
+            if current_time - timestamp < timedelta(seconds=30)
+        ]
+        
+        # Проверяем лимит сообщений
+        if len(user_message_count[user_id]) > 8:
+            # Выдаем мут на 10 минут
+            try:
+                success, message = await mute_user_in_chat(
+                    event.chat_id,
+                    user_id,
+                    duration_minutes=10,
+                    reason="Спам"
+                )
+                
+                if success:
+                    await event.respond(f"🔇 Пользователь {event.sender.first_name} был замучен за спам на 10 минут!")
+                    logger.info(f"Пользователь {user_id} замучен за спам.")
+                    
+                    # Очищаем записи
+                    del user_message_count[user_id]
+                else:
+                    logger.error(f"Не удалось замутить спамера: {message}")
+            except Exception as e:
+                logger.error(f"Ошибка при муте пользователя за спам: {e}")
+
+
+# ========== ЗАПУСК БОТА ==========
+
+def main():
+    """Основная функция запуска"""
+    logger.info("=" * 50)
+    logger.info("Бот WARD ANTISCAM запускается...")
+    logger.info(f"Владельцы: {OWNERS}")
+    logger.info(f"Админы: {ADMINS}")
+    logger.info("=" * 50)
+    
+    try:
+        # Запускаем бота
+        bot.start(bot_token=BOT_TOKEN)
+        logger.info("Бот успешно запущен!")
+        
+        # Отправляем сообщение владельцам
+        for owner_info in OWNERS.values():
+            try:
+                owner_id = int(owner_info["id"])
+                bot.loop.create_task(
+                    bot.send_message(
+                        owner_id,
+                        "✅ Бот WARD ANTISCAM успешно запущен!\n"
+                        f"Время запуска: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                )
+            except:
+                pass
+        
+        bot.run_until_disconnected()
+        
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
+    finally:
+        # Закрываем соединение с БД
+        db.close()
+        logger.info("Бот завершил работу")
+
+
+if __name__ == "__main__":
+    main()
