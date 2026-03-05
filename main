@@ -3,10 +3,12 @@ import logging
 from datetime import datetime
 from pytz import timezone
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InputFile, URLInputFile, ParseMode
+from aiogram.types import InputFile, ParseMode
 from aiogram.utils import executor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+import aiohttp
+import io
 
 # Настройки
 BOT_TOKEN = "8798763207:AAGazb5IckkWpFUR03BcWpXi5FHXcH-3Xj8"
@@ -55,6 +57,15 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 scheduler = AsyncIOScheduler(timezone=MSK_TZ)
 
+async def download_image(url):
+    """Скачивает изображение по URL и возвращает InputFile"""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                data = await resp.read()
+                return InputFile(io.BytesIO(data), filename="image.jpg")
+    return None
+
 @dp.message_handler(commands=['start'])
 async def send_welcome(message: types.Message):
     """Обработчик команды /start"""
@@ -73,15 +84,21 @@ async def send_morning_message():
     try:
         logger.info("Отправка утреннего сообщения в канал...")
         
-        # Отправляем фото с подписью
-        await bot.send_photo(
-            chat_id=CHANNEL_ID,
-            photo=URLInputFile(IMAGE_URL),
-            caption=MORNING_MESSAGE,
-            parse_mode=ParseMode.HTML
-        )
+        # Скачиваем изображение
+        photo = await download_image(IMAGE_URL)
         
-        logger.info("✅ Утреннее сообщение успешно отправлено!")
+        if photo:
+            # Отправляем фото с подписью
+            await bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=photo,
+                caption=MORNING_MESSAGE,
+                parse_mode=ParseMode.HTML
+            )
+            logger.info("✅ Утреннее сообщение успешно отправлено!")
+        else:
+            logger.error("❌ Не удалось скачать изображение")
+            
     except Exception as e:
         logger.error(f"❌ Ошибка при отправке утреннего сообщения: {e}")
 
@@ -90,15 +107,21 @@ async def send_evening_message():
     try:
         logger.info("Отправка вечернего сообщения в канал...")
         
-        # Отправляем фото с подписью
-        await bot.send_photo(
-            chat_id=CHANNEL_ID,
-            photo=URLInputFile(IMAGE_URL),
-            caption=EVENING_MESSAGE,
-            parse_mode=ParseMode.HTML
-        )
+        # Скачиваем изображение
+        photo = await download_image(IMAGE_URL)
         
-        logger.info("✅ Вечернее сообщение успешно отправлено!")
+        if photo:
+            # Отправляем фото с подписью
+            await bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=photo,
+                caption=EVENING_MESSAGE,
+                parse_mode=ParseMode.HTML
+            )
+            logger.info("✅ Вечернее сообщение успешно отправлено!")
+        else:
+            logger.error("❌ Не удалось скачать изображение")
+            
     except Exception as e:
         logger.error(f"❌ Ошибка при отправке вечернего сообщения: {e}")
 
@@ -141,9 +164,9 @@ async def on_startup(dp):
         next_evening = scheduler.get_job("evening_job").next_run_time
         
         if next_morning:
-            logger.info(f"⏰ Следующая утренняя отправка: {next_morning.strftime('%d.%m.%Y %H:%M:%S')}")
+            logger.info(f"⏰ Следующая утренняя отправка: {next_morning.strftime('%d.%m.%Y %H:%M:%S')} МСК")
         if next_evening:
-            logger.info(f"⏰ Следующая вечерняя отправка: {next_evening.strftime('%d.%m.%Y %H:%M:%S')}")
+            logger.info(f"⏰ Следующая вечерняя отправка: {next_evening.strftime('%d.%m.%Y %H:%M:%S')} МСК")
     except:
         pass
     
