@@ -21,7 +21,7 @@ sys.modules['imghdr'] = imghdr_module
 # ====================================================
 
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = "8665739721:AAEk6X_e6BQneT1MHTljQ7U-b1Toiloj-hs"
+BOT_TOKEN = "8678148131:AAEJbW2q6L6tyeXEkTdhYB9ywAVsb1EFTGk"
 CHANNEL_ID = -1002761838993
 CHANNEL_LINK = "https://t.me/KrastuMetroShop"
 MANAGER_LINK = "https://t.me/KrastuManager"
