@@ -1,6 +1,8 @@
 import asyncio
 import logging
-from datetime import datetime
+import os
+import pickle
+from datetime import datetime, time, timedelta
 from pytz import timezone
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InputFile, ParseMode
@@ -10,14 +12,20 @@ from apscheduler.triggers.cron import CronTrigger
 import aiohttp
 import io
 
-# Настройки
+# ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = "8798763207:AAGazb5IckkWpFUR03BcWpXi5FHXcH-3Xj8"
 CHANNEL_ID = -1002761838993
 CHANNEL_LINK = "https://t.me/KrastuMetroShop"
 IMAGE_URL = "https://i.ibb.co/xqT0Y3Z3/IMG-20260305-084651-416.jpg"
 MSK_TZ = timezone('Europe/Moscow')
 
-# Сообщения
+# Время отправки сообщений
+MORNING_HOUR = 10
+MORNING_MINUTE = 0
+EVENING_HOUR = 22
+EVENING_MINUTE = 0
+
+# ==================== СООБЩЕНИЯ ====================
 MORNING_MESSAGE = """✅Принемаем заказы✅
 🛒Всё в наличии🛒
 ⏱Работаю с 10:00 до 22:00 по мск
@@ -48,115 +56,358 @@ START_MESSAGE = """👋 Добрый день!
 
 Подписывайся, чтобы ничего не пропустить! 🔔""".format(channel_link=CHANNEL_LINK)
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера
+# ==================== ИНИЦИАЛИЗАЦИЯ ====================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 scheduler = AsyncIOScheduler(timezone=MSK_TZ)
 
+# ==================== СИСТЕМА ХРАНЕНИЯ СОСТОЯНИЯ ====================
+STATE_FILE = "bot_state.pkl"
+
+class BotState:
+    """Класс для хранения состояния бота"""
+    def __init__(self):
+        self.last_morning_date = None  # Дата последнего утреннего сообщения
+        self.last_evening_date = None  # Дата последнего вечернего сообщения
+        self.last_morning_time = None  # Время последнего утреннего сообщения
+        self.last_evening_time = None  # Время последнего вечернего сообщения
+        self.start_time = datetime.now(MSK_TZ)  # Время запуска бота
+    
+    def save(self):
+        """Сохраняет состояние в файл"""
+        try:
+            with open(STATE_FILE, 'wb') as f:
+                pickle.dump(self, f)
+            logger.info("💾 Состояние бота сохранено")
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения состояния: {e}")
+    
+    @staticmethod
+    def load():
+        """Загружает состояние из файла"""
+        try:
+            if os.path.exists(STATE_FILE):
+                with open(STATE_FILE, 'rb') as f:
+                    state = pickle.load(f)
+                logger.info("📂 Состояние бота загружено")
+                return state
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки состояния: {e}")
+        return BotState()
+
+# Загружаем состояние
+bot_state = BotState.load()
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 async def download_image(url):
     """Скачивает изображение по URL и возвращает InputFile"""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                data = await resp.read()
-                return InputFile(io.BytesIO(data), filename="image.jpg")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    logger.info(f"✅ Изображение скачано: {len(data)} байт")
+                    return InputFile(io.BytesIO(data), filename="image.jpg")
+                else:
+                    logger.error(f"❌ Ошибка скачивания изображения: HTTP {resp.status}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при скачивании изображения: {e}")
     return None
 
-@dp.message_handler(commands=['start'])
-async def send_welcome(message: types.Message):
-    """Обработчик команды /start"""
-    try:
-        logger.info(f"Пользователь @{message.from_user.username} (ID: {message.from_user.id}) запустил бота")
-        
-        # Отправляем приветственное сообщение
-        await message.reply(START_MESSAGE, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        
-        logger.info(f"✅ Приветствие отправлено пользователю {message.from_user.id}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка при отправке приветствия: {e}")
+def get_today_date():
+    """Возвращает сегодняшнюю дату в МСК"""
+    return datetime.now(MSK_TZ).date()
 
-async def send_morning_message():
+def get_target_time(hour, minute):
+    """Возвращает время сегодня в указанный час"""
+    today = get_today_date()
+    return MSK_TZ.localize(datetime.combine(today, time(hour, minute, 0)))
+
+async def send_photo_with_retry(chat_id, photo, caption, max_retries=3):
+    """Отправляет фото с повторными попытками при ошибке"""
+    for attempt in range(max_retries):
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+            logger.info(f"✅ Сообщение отправлено (попытка {attempt + 1})")
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка отправки (попытка {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(5)  # Ждем 5 секунд перед повтором
+    logger.error("❌ Не удалось отправить сообщение после всех попыток")
+    return False
+
+# ==================== ФУНКЦИИ ОТПРАВКИ СООБЩЕНИЙ ====================
+async def send_morning_message(is_retroactive=False):
     """Отправка утреннего сообщения в 10:00"""
     try:
-        logger.info("Отправка утреннего сообщения в канал...")
+        message_type = "ПРОПУЩЕННОЕ УТРЕННЕЕ" if is_retroactive else "УТРЕННЕЕ"
+        logger.info(f"📤 Отправка {message_type} сообщения...")
         
         # Скачиваем изображение
         photo = await download_image(IMAGE_URL)
         
         if photo:
-            # Отправляем фото с подписью
-            await bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=photo,
-                caption=MORNING_MESSAGE,
-                parse_mode=ParseMode.HTML
-            )
-            logger.info("✅ Утреннее сообщение успешно отправлено!")
+            # Формируем подпись
+            caption = MORNING_MESSAGE
+            if is_retroactive:
+                caption = "⚠️ ПРОПУЩЕННОЕ СООБЩЕНИЕ (10:00)\n\n" + MORNING_MESSAGE
+            
+            # Отправляем с повторными попытками
+            success = await send_photo_with_retry(CHANNEL_ID, photo, caption)
+            
+            if success:
+                # Обновляем состояние
+                bot_state.last_morning_date = get_today_date()
+                bot_state.last_morning_time = datetime.now(MSK_TZ)
+                bot_state.save()
+                
+                logger.info(f"✅ {message_type} сообщение успешно отправлено!")
+                return True
         else:
             logger.error("❌ Не удалось скачать изображение")
             
     except Exception as e:
         logger.error(f"❌ Ошибка при отправке утреннего сообщения: {e}")
+    return False
 
-async def send_evening_message():
+async def send_evening_message(is_retroactive=False):
     """Отправка вечернего сообщения в 22:00"""
     try:
-        logger.info("Отправка вечернего сообщения в канал...")
+        message_type = "ПРОПУЩЕННОЕ ВЕЧЕРНЕЕ" if is_retroactive else "ВЕЧЕРНЕЕ"
+        logger.info(f"📤 Отправка {message_type} сообщения...")
         
         # Скачиваем изображение
         photo = await download_image(IMAGE_URL)
         
         if photo:
-            # Отправляем фото с подписью
-            await bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=photo,
-                caption=EVENING_MESSAGE,
-                parse_mode=ParseMode.HTML
-            )
-            logger.info("✅ Вечернее сообщение успешно отправлено!")
+            # Формируем подпись
+            caption = EVENING_MESSAGE
+            if is_retroactive:
+                caption = "⚠️ ПРОПУЩЕННОЕ СООБЩЕНИЕ (22:00)\n\n" + EVENING_MESSAGE
+            
+            # Отправляем с повторными попытками
+            success = await send_photo_with_retry(CHANNEL_ID, photo, caption)
+            
+            if success:
+                # Обновляем состояние
+                bot_state.last_evening_date = get_today_date()
+                bot_state.last_evening_time = datetime.now(MSK_TZ)
+                bot_state.save()
+                
+                logger.info(f"✅ {message_type} сообщение успешно отправлено!")
+                return True
         else:
             logger.error("❌ Не удалось скачать изображение")
             
     except Exception as e:
         logger.error(f"❌ Ошибка при отправке вечернего сообщения: {e}")
+    return False
 
+# ==================== ПРОВЕРКА ПРОПУЩЕННЫХ СООБЩЕНИЙ ====================
+async def check_missed_messages():
+    """Тщательная проверка всех пропущенных сообщений"""
+    logger.info("🔍 ЗАПУСК ТЩАТЕЛЬНОЙ ПРОВЕРКИ ПРОПУЩЕННЫХ СООБЩЕНИЙ...")
+    
+    now = datetime.now(MSK_TZ)
+    today = get_today_date()
+    logger.info(f"📅 Текущее время: {now.strftime('%Y-%m-%d %H:%M:%S')} МСК")
+    
+    # Время сегодняшних отправок
+    morning_time_today = get_target_time(MORNING_HOUR, MORNING_MINUTE)
+    evening_time_today = get_target_time(EVENING_HOUR, EVENING_MINUTE)
+    
+    logger.info(f"⏰ Сегодняшнее утреннее время: {morning_time_today.strftime('%H:%M')}")
+    logger.info(f"⏰ Сегодняшнее вечернее время: {evening_time_today.strftime('%H:%M')}")
+    
+    # ===== ПРОВЕРКА УТРЕННЕГО СООБЩЕНИЯ =====
+    if now >= morning_time_today:
+        logger.info("🔎 Проверка утреннего сообщения...")
+        
+        # Проверяем, было ли отправлено утреннее сообщение сегодня
+        morning_needed = False
+        
+        if bot_state.last_morning_date is None:
+            logger.info("📊 Утреннее сообщение никогда не отправлялось")
+            morning_needed = True
+        elif bot_state.last_morning_date < today:
+            logger.info(f"📊 Последнее утреннее сообщение было: {bot_state.last_morning_date} (не сегодня)")
+            morning_needed = True
+        else:
+            logger.info(f"✅ Утреннее сообщение сегодня уже отправлено в {bot_state.last_morning_time.strftime('%H:%M:%S')}")
+        
+        # Если нужно отправить, проверяем, не слишком ли поздно
+        if morning_needed:
+            time_diff = now - morning_time_today
+            logger.info(f"⏱️ Прошло {time_diff.total_seconds() / 60:.1f} минут после времени отправки")
+            
+            logger.info("⚠️ ОБНАРУЖЕНО ПРОПУЩЕННОЕ УТРЕННЕЕ СООБЩЕНИЕ! Отправляю...")
+            await send_morning_message(is_retroactive=True)
+    else:
+        logger.info(f"⏳ До утренней отправки осталось: {(morning_time_today - now).total_seconds() / 60:.1f} минут")
+    
+    # ===== ПРОВЕРКА ВЕЧЕРНЕГО СООБЩЕНИЯ =====
+    if now >= evening_time_today:
+        logger.info("🔎 Проверка вечернего сообщения...")
+        
+        # Проверяем, было ли отправлено вечернее сообщение сегодня
+        evening_needed = False
+        
+        if bot_state.last_evening_date is None:
+            logger.info("📊 Вечернее сообщение никогда не отправлялось")
+            evening_needed = True
+        elif bot_state.last_evening_date < today:
+            logger.info(f"📊 Последнее вечернее сообщение было: {bot_state.last_evening_date} (не сегодня)")
+            evening_needed = True
+        else:
+            logger.info(f"✅ Вечернее сообщение сегодня уже отправлено в {bot_state.last_evening_time.strftime('%H:%M:%S')}")
+        
+        # Если нужно отправить
+        if evening_needed:
+            logger.info("⚠️ ОБНАРУЖЕНО ПРОПУЩЕННОЕ ВЕЧЕРНЕЕ СООБЩЕНИЕ! Отправляю...")
+            await send_evening_message(is_retroactive=True)
+    else:
+        logger.info(f"⏳ До вечерней отправки осталось: {(evening_time_today - now).total_seconds() / 60:.1f} минут")
+    
+    logger.info("✅ Проверка пропущенных сообщений завершена")
+
+# ==================== КОМАНДЫ ДЛЯ ТЕСТИРОВАНИЯ ====================
+@dp.message_handler(commands=['start'])
+async def send_welcome(message: types.Message):
+    """Обработчик команды /start"""
+    try:
+        user = message.from_user
+        logger.info(f"👤 Пользователь @{user.username} (ID: {user.id}) запустил бота")
+        
+        await message.reply(START_MESSAGE, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        logger.info(f"✅ Приветствие отправлено пользователю {user.id}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при отправке приветствия: {e}")
+
+@dp.message_handler(commands=['status'])
+async def show_status(message: types.Message):
+    """Показывает статус бота"""
+    try:
+        now = datetime.now(MSK_TZ)
+        today = get_today_date()
+        
+        status = f"📊 **СТАТУС БОТА**\n\n"
+        status += f"🕐 Текущее время: {now.strftime('%Y-%m-%d %H:%M:%S')} МСК\n"
+        status += f"🚀 Бот запущен: {bot_state.start_time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        
+        status += f"**Утренние сообщения (10:00):**\n"
+        if bot_state.last_morning_date:
+            status += f"✅ Последнее: {bot_state.last_morning_date}"
+            if bot_state.last_morning_date == today:
+                status += f" в {bot_state.last_morning_time.strftime('%H:%M:%S')}\n"
+            else:
+                status += f" (не сегодня)\n"
+        else:
+            status += f"❌ Ещё не отправлялись\n"
+        
+        status += f"\n**Вечерние сообщения (22:00):**\n"
+        if bot_state.last_evening_date:
+            status += f"✅ Последнее: {bot_state.last_evening_date}"
+            if bot_state.last_evening_date == today:
+                status += f" в {bot_state.last_evening_time.strftime('%H:%M:%S')}\n"
+            else:
+                status += f" (не сегодня)\n"
+        else:
+            status += f"❌ Ещё не отправлялись\n"
+        
+        await message.reply(status, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"❌ Ошибка при показе статуса: {e}")
+
+@dp.message_handler(commands=['check'])
+async def manual_check(message: types.Message):
+    """Ручная проверка пропущенных сообщений"""
+    await message.reply("🔍 Запускаю проверку пропущенных сообщений...")
+    await check_missed_messages()
+    await message.reply("✅ Проверка завершена!")
+
+@dp.message_handler(commands=['test_morning'])
+async def test_morning(message: types.Message):
+    """Тестовая отправка утреннего сообщения"""
+    await message.reply("🧪 Отправляю тестовое утреннее сообщение...")
+    result = await send_morning_message(is_retroactive=True)
+    if result:
+        await message.reply("✅ Тестовое сообщение отправлено!")
+    else:
+        await message.reply("❌ Ошибка при отправке!")
+
+@dp.message_handler(commands=['test_evening'])
+async def test_evening(message: types.Message):
+    """Тестовая отправка вечернего сообщения"""
+    await message.reply("🧪 Отправляю тестовое вечернее сообщение...")
+    result = await send_evening_message(is_retroactive=True)
+    if result:
+        await message.reply("✅ Тестовое сообщение отправлено!")
+    else:
+        await message.reply("❌ Ошибка при отправке!")
+
+@dp.message_handler(commands=['reset_state'])
+async def reset_state(message: types.Message):
+    """Сброс состояния (для тестирования)"""
+    global bot_state
+    bot_state = BotState()
+    bot_state.save()
+    await message.reply("🔄 Состояние бота сброшено!")
+
+# ==================== ЗАПУСК И ОСТАНОВКА ====================
 async def on_startup(dp):
     """Действия при запуске бота"""
-    logger.info("🚀 Бот запускается...")
+    logger.info("=" * 50)
+    logger.info("🚀 БОТ ЗАПУСКАЕТСЯ...")
+    logger.info("=" * 50)
     
     # Проверяем подключение к каналу
     try:
         chat = await bot.get_chat(CHANNEL_ID)
         logger.info(f"✅ Подключение к каналу '{chat.title}' успешно!")
+        logger.info(f"📢 Канал: {chat.title} (ID: {CHANNEL_ID})")
     except Exception as e:
-        logger.error(f"❌ Не удалось подключиться к каналу: {e}")
-        logger.error("Проверьте, добавили ли вы бота в администраторы канала!")
+        logger.error(f"❌ НЕ УДАЛОСЬ ПОДКЛЮЧИТЬСЯ К КАНАЛУ: {e}")
+        logger.error("🚨 ПРОВЕРЬТЕ, ДОБАВИЛИ ЛИ ВЫ БОТА В АДМИНИСТРАТОРЫ КАНАЛА!")
         return False
     
+    # Запускаем тщательную проверку пропущенных сообщений
+    await check_missed_messages()
+    
     # Добавляем задачи в планировщик
-    # Утренняя отправка в 10:00
     scheduler.add_job(
         send_morning_message,
-        trigger=CronTrigger(hour=10, minute=0, timezone=MSK_TZ),
+        trigger=CronTrigger(hour=MORNING_HOUR, minute=MORNING_MINUTE, timezone=MSK_TZ),
         id="morning_job",
         replace_existing=True
     )
     
-    # Вечерняя отправка в 22:00
     scheduler.add_job(
         send_evening_message,
-        trigger=CronTrigger(hour=22, minute=0, timezone=MSK_TZ),
+        trigger=CronTrigger(hour=EVENING_HOUR, minute=EVENING_MINUTE, timezone=MSK_TZ),
         id="evening_job",
         replace_existing=True
     )
     
     # Запускаем планировщик
     scheduler.start()
+    logger.info("⏰ Планировщик задач запущен")
     
     # Показываем следующие запланированные отправки
     try:
@@ -167,21 +418,41 @@ async def on_startup(dp):
             logger.info(f"⏰ Следующая утренняя отправка: {next_morning.strftime('%d.%m.%Y %H:%M:%S')} МСК")
         if next_evening:
             logger.info(f"⏰ Следующая вечерняя отправка: {next_evening.strftime('%d.%m.%Y %H:%M:%S')} МСК")
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении следующего времени: {e}")
     
-    logger.info("✅ Бот успешно запущен и ожидает времени отправки!")
-    logger.info("📝 Команда /start работает для личных сообщений")
+    logger.info("=" * 50)
+    logger.info("✅ БОТ УСПЕШНО ЗАПУЩЕН И ГОТОВ К РАБОТЕ!")
+    logger.info("📝 Доступные команды: /start, /status, /check, /test_morning, /test_evening, /reset_state")
+    logger.info("=" * 50)
     
     return True
 
 async def on_shutdown(dp):
     """Действия при остановке бота"""
-    logger.info("🛑 Бот останавливается...")
+    logger.info("=" * 50)
+    logger.info("🛑 БОТ ОСТАНАВЛИВАЕТСЯ...")
+    logger.info("=" * 50)
+    
+    # Сохраняем состояние
+    bot_state.save()
+    
+    # Останавливаем планировщик
     scheduler.shutdown()
+    logger.info("⏰ Планировщик остановлен")
+    
+    # Закрываем сессию бота
     await bot.session.close()
-    logger.info("✅ Бот остановлен")
+    logger.info("🔌 Сессия бота закрыта")
+    
+    logger.info("✅ БОТ УСПЕШНО ОСТАНОВЛЕН")
+    logger.info("=" * 50)
 
+# ==================== ЗАПУСК ====================
 if __name__ == "__main__":
-    # Запускаем бота
-    executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown, skip_updates=True)
+    try:
+        executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown, skip_updates=True)
+    except KeyboardInterrupt:
+        logger.info("👋 Получен сигнал остановки")
+    except Exception as e:
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
