@@ -1,45 +1,43 @@
-import logging
-import threading
-import requests
+# ========== ЭТО ДОЛЖНО БЫТЬ САМЫМ ПЕРВЫМ ==========
 import sys
 import types
-from datetime import datetime
-import pytz
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-import io
 
-# ========== ЭМУЛЯЦИЯ imghdr ДЛЯ PYTHON 3.13 ==========
-# (Нужно для совместимости, если у вас Python 3.13)
+# СОЗДАЕМ ФАЛЬШИВЫЙ МОДУЛЬ imghdr ПЕРЕД ВСЕМИ ИМПОРТАМИ
 imghdr_module = types.ModuleType('imghdr')
 def what(file, h=None):
     return None
 imghdr_module.what = what
 sys.modules['imghdr'] = imghdr_module
-# ====================================================
+# ===================================================
+
+# ТЕПЕРЬ МОЖНО ИМПОРТИРОВАТЬ ВСЕ ОСТАЛЬНОЕ
+import logging
+import pickle
+import os
+import threading
+import requests
+from datetime import datetime, timedelta
+import pytz
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import io
 
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = "8678148131:AAEJbW2q6L6tyeXEkTdhYB9ywAVsb1EFTGk"
+BOT_TOKEN = "8678148131:AAEJbW2q6L6tyeXEkTdhYB9ywAVsb1EFTGk"  # НОВЫЙ ТОКЕН
 CHANNEL_ID = -1002761838993
 CHANNEL_LINK = "https://t.me/KrastuMetroShop"
+CHAT_ID = -1003208443966
 MANAGER_LINK = "https://t.me/KrastuManager"
-
-# НОВЫЕ ССЫЛКИ ДЛЯ КНОПОК
-SOPR_LINK = "https://t.me/krastu1"          # Канал для сопровождения
-THINGS_LINK = "https://t.me/PriceKrastu"    # Канал для вещей (прайс)
-REVIEWS_LINK = "https://t.me/KrastuReviews" # Канал с отзывами
-
-# НОВАЯ ССЫЛКА НА ФОТО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ
 PRIVATE_PHOTO_URL = "https://i.ibb.co/Y7FB9kFH/IMG-20260305-192810-698.jpg"
-
-# ОБЩАЯ КАРТИНКА ДЛЯ КАНАЛА (оставим старую или можно заменить)
 CHANNEL_IMAGE_URL = "https://i.ibb.co/xqT0Y3Z3/IMG-20260305-084651-416.jpg"
-
 MSK_TZ = pytz.timezone('Europe/Moscow')
-# ====================================================
 
+OWNER_IDS = [7404241242, 7557345458]
+REFERRAL_BONUS = 1.0
+
+# -------------------- СООБЩЕНИЯ --------------------
 MORNING_MSG = """✅Принемаем заказы✅
 🛒Всё в наличии🛒
 ⏱Работаю с 10:00 до 22:00 по мск
@@ -64,19 +62,45 @@ EVENING_MSG = """👎Заказы не пренимаем👎
 WELCOME_TEXT = """👋 Добро пожаловать в KRASTU metro SHOP!
 
 Выберите интересующий вас раздел:"""
+# ---------------------------------------------------
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ==================== БАЗА ДАННЫХ ====================
+DATA_FILE = "bot_data.pkl"
+
+class Database:
+    def __init__(self):
+        self.sopr_items = {}
+        self.things_items = {}
+        self.orders = {}
+        self.users = {}
+        self.next_id = 1
+        self.pending_subscriptions = {}
+
+    def save(self):
+        with open(DATA_FILE, 'wb') as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def load():
+        try:
+            if os.path.exists(DATA_FILE):
+                with open(DATA_FILE, 'rb') as f:
+                    return pickle.load(f)
+        except:
+            pass
+        return Database()
+
+db = Database.load()
 scheduler = BackgroundScheduler(timezone=MSK_TZ)
 
-# Флаги для защиты от спама в канале
 _sent_morning = False
 _sent_evening = False
 
-# ==================== ФУНКЦИИ ДЛЯ КАНАЛА ====================
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
 def download_image_sync(url):
-    """Скачивает картинку по URL"""
     try:
         response = requests.get(url, timeout=30)
         if response.status_code == 200:
@@ -86,129 +110,693 @@ def download_image_sync(url):
         logger.error(f"Ошибка скачивания: {e}")
     return None
 
+def get_user(user_id):
+    if user_id not in db.users:
+        db.users[user_id] = {"balance": 0.0, "referrals": [], "referred_by": None}
+        db.save()
+    return db.users[user_id]
+
+def generate_referral_link(user_id):
+    return f"https://t.me/{(__import__('telegram').Bot(BOT_TOKEN).username)}?start=ref_{user_id}"
+
+def check_subscription(user_id, chat_id, bot):
+    try:
+        member = bot.get_chat_member(chat_id, user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except:
+        return False
+
+# ---------- ФУНКЦИИ ДЛЯ КАНАЛА ----------
 def send_morning(is_retro=False):
-    """Отправляет утреннее сообщение в канал"""
     global _sent_morning
     if _sent_morning:
         return False
-
     logger.info("📤 Отправка утреннего в канал...")
     photo = download_image_sync(CHANNEL_IMAGE_URL)
     if not photo:
-        logger.error("❌ Не удалось скачать фото")
         return False
-
     caption = MORNING_MSG
     if is_retro:
         caption = f"⚠️ ПРОПУЩЕНО (10:00)\n\n{MORNING_MSG}"
-
     try:
         files = {'photo': photo}
         data = {'chat_id': CHANNEL_ID, 'caption': caption}
-        response = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", files=files, data=data)
-        if response.status_code == 200:
-            logger.info("✅ Утреннее в канал отправлено!")
-            _sent_morning = True
-            return True
-        else:
-            logger.error(f"❌ Ошибка Telegram: {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", files=files, data=data)
+        _sent_morning = True
+        return True
+    except:
         return False
 
 def send_evening(is_retro=False):
-    """Отправляет вечернее сообщение в канал"""
     global _sent_evening
     if _sent_evening:
         return False
-
     logger.info("📤 Отправка вечернего в канал...")
     photo = download_image_sync(CHANNEL_IMAGE_URL)
     if not photo:
-        logger.error("❌ Не удалось скачать фото")
         return False
-
     caption = EVENING_MSG
     if is_retro:
         caption = f"⚠️ ПРОПУЩЕНО (22:00)\n\n{EVENING_MSG}"
-
     try:
         files = {'photo': photo}
         data = {'chat_id': CHANNEL_ID, 'caption': caption}
-        response = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", files=files, data=data)
-        if response.status_code == 200:
-            logger.info("✅ Вечернее в канал отправлено!")
-            _sent_evening = True
-            return True
-        else:
-            logger.error(f"❌ Ошибка Telegram: {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", files=files, data=data)
+        _sent_evening = True
+        return True
+    except:
         return False
 
-# ==================== КОМАНДЫ В ЛИЧКЕ ====================
-def start(update: Update, context):
-    """Обработчик команды /start"""
-    # КНОПКИ - ТЕПЕРЬ ВСЕ ВЕДУТ ПО ССЫЛКАМ
+# ---------- ОБРАБОТЧИК КОМАНДЫ /start ----------
+def start(update: Update, context: CallbackContext):
+    user = update.effective_user
+    user_id = user.id
+    args = context.args
+
+    if args and args[0].startswith('ref_'):
+        try:
+            referrer_id = int(args[0].split('_')[1])
+            if referrer_id != user_id:
+                if user_id not in db.users or not db.users[user_id].get('referred_by'):
+                    get_user(user_id)
+                    get_user(referrer_id)
+                    db.users[user_id]['referred_by'] = referrer_id
+                    db.users[referrer_id]['referrals'].append(user_id)
+                    db.save()
+                    context.user_data['pending_referrer'] = referrer_id
+        except:
+            pass
+
+    # Проверка обязательных подписок
+    need_to_subscribe = None
+    for chat_id_str, sub_info in db.pending_subscriptions.items():
+        chat_id = int(chat_id_str)
+        if sub_info['until'] and sub_info['until'] < datetime.now(MSK_TZ):
+            continue
+        if not check_subscription(user_id, chat_id, context.bot):
+            need_to_subscribe = (chat_id, sub_info['link'])
+            break
+
+    if need_to_subscribe:
+        chat_id, link = need_to_subscribe
+        keyboard = [
+            [InlineKeyboardButton("✅ Я ПОДПИСАЛСЯ", callback_data=f"check_sub_{chat_id}")],
+            [InlineKeyboardButton("🔍 ПЕРЕЙТИ", url=link)]
+        ]
+        update.message.reply_text(
+            f"❌ Для доступа к боту необходимо подписаться на этот канал:\n{link}\n\nПосле подписки нажмите кнопку ниже.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    # Основное меню
+    photo = download_image_sync(PRIVATE_PHOTO_URL)
     keyboard = [
         [InlineKeyboardButton("🛍 МЕТРО ШОП", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("👥 СОПРОВОЖДЕНИЕ", url=SOPR_LINK)],      # Новая ссылка
-        [InlineKeyboardButton("👕 ВЕЩИ", url=THINGS_LINK)],              # Новая ссылка
-        [InlineKeyboardButton("📥 ОТЗЫВЫ", url=REVIEWS_LINK)],
+        [InlineKeyboardButton("👥 СОПРОВОЖДЕНИЯ", callback_data="sopr_menu")],
+        [InlineKeyboardButton("👕 ВЕЩИ", callback_data="things_menu")],
+        [InlineKeyboardButton("👥 РЕФЕРАЛЫ", callback_data="referral_menu")],
+        [InlineKeyboardButton("👤 ПРОФИЛЬ", callback_data="profile_menu")],
         [InlineKeyboardButton("💬 МЕНЕДЖЕР", url=MANAGER_LINK)]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # НОВАЯ ФОТОГРАФИЯ ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ
-    photo = download_image_sync(PRIVATE_PHOTO_URL)
     if photo:
-        # Отправляем фото с подписью и кнопками
         context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo, caption=WELCOME_TEXT, reply_markup=reply_markup)
     else:
-        # Если фото не загрузилось, отправляем только текст
         update.message.reply_text(WELCOME_TEXT, reply_markup=reply_markup)
 
-# ==================== ЗАПУСК ====================
+# ---------- ПРОВЕРКА ПОДПИСКИ ----------
+def check_subscription_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    user_id = query.from_user.id
+    data = query.data
+    query.answer()
+
+    if data.startswith('check_sub_'):
+        chat_id = int(data.split('_')[2])
+
+        if check_subscription(user_id, chat_id, context.bot):
+            if 'pending_referrer' in context.user_data:
+                referrer_id = context.user_data['pending_referrer']
+                if referrer_id in db.users and user_id in db.users and db.users[user_id].get('referred_by') == referrer_id:
+                    db.users[referrer_id]['balance'] += REFERRAL_BONUS
+                    db.save()
+                    context.bot.send_message(chat_id=referrer_id, text=f"🎉 Вам начислен 1₽ за нового реферала!")
+                context.user_data.pop('pending_referrer', None)
+
+            # Удаляем сообщение с проверкой (с обработкой ошибки)
+            try:
+                query.message.delete()
+            except:
+                pass
+                
+            # Создаем новое сообщение для start
+            context.bot.send_message(
+                chat_id=user_id,
+                text="✅ Подписка подтверждена! Загружаю меню..."
+            )
+            # Создаем фейковый update для start
+            fake_update = Update(update.update_id)
+            fake_update.effective_user = update.effective_user
+            fake_update.effective_chat = update.effective_chat
+            fake_update.message = type('obj', (object,), {
+                'reply_text': lambda text, reply_markup=None: context.bot.send_message(
+                    chat_id=user_id, text=text, reply_markup=reply_markup
+                )
+            })
+            start(fake_update, context)
+        else:
+            query.answer("❌ Вы еще не подписались!", show_alert=True)
+
+# ---------- МЕНЮ СОПРОВОЖДЕНИЙ ----------
+def sopr_menu(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    # Удаляем старое сообщение (с обработкой ошибки)
+    try:
+        query.message.delete()
+    except:
+        pass
+    
+    if not db.sopr_items:
+        keyboard = [[InlineKeyboardButton("◀ НАЗАД", callback_data="back_to_main")]]
+        context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="📭 Сопровождений пока нет",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+    
+    keyboard = []
+    for item_id, item in db.sopr_items.items():
+        keyboard.append([InlineKeyboardButton(
+            f"{item['name']} - {item['price']}₽", 
+            callback_data=f"sopr_{item_id}"
+        )])
+    keyboard.append([InlineKeyboardButton("◀ НАЗАД", callback_data="back_to_main")])
+    
+    context.bot.send_message(
+        chat_id=query.from_user.id,
+        text="👥 Выберите сопровождение:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def sopr_detail(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    try:
+        query.message.delete()
+    except:
+        pass
+    
+    item_id = query.data.split("_")[1]
+    item = db.sopr_items.get(item_id)
+    if not item:
+        context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="❌ Товар не найден"
+        )
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ КУПИТЬ", callback_data=f"buy_sopr_{item_id}")],
+        [InlineKeyboardButton("◀ НАЗАД", callback_data="sopr_menu")]
+    ]
+    text = f"👥 {item['name']}\n💰 Цена: {item['price']}₽"
+    
+    context.bot.send_message(
+        chat_id=query.from_user.id,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ---------- МЕНЮ ВЕЩЕЙ ----------
+def things_menu(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    try:
+        query.message.delete()
+    except:
+        pass
+    
+    if not db.things_items:
+        keyboard = [[InlineKeyboardButton("◀ НАЗАД", callback_data="back_to_main")]]
+        context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="📭 Вещей пока нет",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+    
+    keyboard = []
+    for item_id, item in db.things_items.items():
+        keyboard.append([InlineKeyboardButton(
+            f"{item['name']} - {item['price']}₽", 
+            callback_data=f"thing_{item_id}"
+        )])
+    keyboard.append([InlineKeyboardButton("◀ НАЗАД", callback_data="back_to_main")])
+    
+    context.bot.send_message(
+        chat_id=query.from_user.id,
+        text="👕 Выберите вещь:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def thing_detail(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    try:
+        query.message.delete()
+    except:
+        pass
+    
+    item_id = query.data.split("_")[1]
+    item = db.things_items.get(item_id)
+    if not item:
+        context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="❌ Товар не найден"
+        )
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ КУПИТЬ", callback_data=f"buy_thing_{item_id}")],
+        [InlineKeyboardButton("◀ НАЗАД", callback_data="things_menu")]
+    ]
+    text = f"👕 {item['name']}\n💰 Цена: {item['price']}₽"
+    
+    context.bot.send_message(
+        chat_id=query.from_user.id,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ---------- ПОКУПКА ----------
+def buy_item(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    data_parts = query.data.split("_")
+    item_type = data_parts[1]
+    item_id = data_parts[2]
+    item = db.sopr_items.get(item_id) if item_type == 'sopr' else db.things_items.get(item_id)
+    
+    if not item:
+        try:
+            query.message.delete()
+        except:
+            pass
+        context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="❌ Товар не найден"
+        )
+        return
+    
+    try:
+        query.message.delete()
+    except:
+        pass
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ ДА", callback_data=f"confirm_{item_type}_{item_id}")],
+        [InlineKeyboardButton("❌ НЕТ", callback_data=f"{item_type}_menu")]
+    ]
+    
+    context.bot.send_message(
+        chat_id=query.from_user.id,
+        text=f"❓ Хотите купить {item['name']} за {item['price']}₽?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def confirm_payment(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    data_parts = query.data.split("_")
+    item_type = data_parts[1]
+    item_id = data_parts[2]
+    item = db.sopr_items.get(item_id) if item_type == 'sopr' else db.things_items.get(item_id)
+    
+    if not item:
+        try:
+            query.message.delete()
+        except:
+            pass
+        context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="❌ Товар не найден"
+        )
+        return
+
+    order_id = f"{item_type}_{item_id}_{datetime.now().timestamp()}"
+    db.orders[order_id] = {
+        "user_id": query.from_user.id,
+        "username": query.from_user.username or "нет юзернейма",
+        "type": item_type,
+        "item": item,
+        "status": "waiting_payment"
+    }
+    db.save()
+
+    try:
+        query.message.delete()
+    except:
+        pass
+
+    keyboard = [
+        [InlineKeyboardButton("💳 Я ПЕРЕВЕЛ", callback_data=f"paid_{order_id}")],
+        [InlineKeyboardButton("◀ ОТМЕНА", callback_data=f"{item_type}_menu")]
+    ]
+    payment_text = f"""💳 Реквизиты для оплаты:
+
++7 958 261 58 16
+🏦 Сбер-банк
+Получатель: ДАНИИЛ Б.
+
+Сумма: {item['price']}₽
+💰 Ваш баланс: {get_user(query.from_user.id)['balance']}₽
+
+После перевода нажмите "Я ПЕРЕВЕЛ" """
+    
+    context.bot.send_message(
+        chat_id=query.from_user.id,
+        text=payment_text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def paid(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    order_id = query.data.split("_")[1]
+    order = db.orders.get(order_id)
+    if not order:
+        try:
+            query.message.delete()
+        except:
+            pass
+        context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="❌ Заказ не найден"
+        )
+        return
+
+    order['status'] = "waiting_confirmation"
+    db.save()
+
+    username = query.from_user.username or f"id{query.from_user.id}"
+    item_name = order['item']['name']
+    item_price = order['item']['price']
+    item_type_ru = "сопровождение" if order['type'] == 'sopr' else "вещь"
+
+    # Уведомление владельцам
+    for owner_id in OWNER_IDS:
+        try:
+            text = f"💰 Новый перевод!\n\nТовар: {item_name}\nЦена: {item_price}₽\nПокупатель: @{username}\nТип: {item_type_ru}"
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ ДА", callback_data=f"confirm_owner_{order_id}"),
+                    InlineKeyboardButton("❌ НЕТ", callback_data=f"reject_owner_{order_id}")
+                ]
+            ]
+            context.bot.send_message(chat_id=owner_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+        except:
+            pass
+
+    # Сообщение в общий чат
+    try:
+        chat_text = f"🛒 Новая покупка!\nПользователь @{username} купил {item_type_ru} - {item_name}"
+        context.bot.send_message(chat_id=CHAT_ID, text=chat_text)
+    except:
+        pass
+
+    try:
+        query.message.delete()
+    except:
+        pass
+    
+    context.bot.send_message(
+        chat_id=query.from_user.id,
+        text="✅ Заявка отправлена владельцу! Ожидайте подтверждения."
+    )
+
+def owner_confirm(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+
+    if query.from_user.id not in OWNER_IDS:
+        query.edit_message_text("⛔ Нет прав")
+        return
+
+    order_id = query.data.split("_")[2]
+    order = db.orders.get(order_id)
+    if not order:
+        query.edit_message_text("❌ Заказ не найден")
+        return
+
+    order['status'] = "confirmed"
+    db.save()
+
+    username = order['username']
+    item_name = order['item']['name']
+    item_type_ru = "сопровождение" if order['type'] == 'sopr' else "вещь"
+
+    # Сообщение покупателю
+    try:
+        context.bot.send_message(
+            chat_id=order['user_id'],
+            text=f"✅ Оплата подтверждена!\n\nХорошо, у вас человек купил {item_type_ru} '{item_name}'.\nНайдите команду для {item_type_ru} удачи!"
+        )
+    except:
+        pass
+
+    # Сообщение в чат
+    try:
+        chat_text = f"✅ Подтверждена покупка!\n\n👤 Покупатель: @{username}\n📦 Товар: {item_name} ({item_type_ru})\n\n👥 Уважаемые сопровождающие, примите заказ в работу!"
+        context.bot.send_message(chat_id=CHAT_ID, text=chat_text)
+    except:
+        pass
+
+    query.edit_message_text(text="✅ Подтверждено!")
+
+def owner_reject(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+
+    if query.from_user.id not in OWNER_IDS:
+        query.edit_message_text("⛔ Нет прав")
+        return
+
+    order_id = query.data.split("_")[2]
+    order = db.orders.get(order_id)
+    if not order:
+        query.edit_message_text("❌ Заказ не найден")
+        return
+
+    order['status'] = "rejected"
+    db.save()
+
+    # Сообщение покупателю
+    try:
+        context.bot.send_message(
+            chat_id=order['user_id'],
+            text="❌ Оплата не подтверждена. Свяжитесь с @KrastuManager"
+        )
+    except:
+        pass
+
+    query.edit_message_text(text="❌ Отклонено")
+
+def referral_menu(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    try:
+        query.message.delete()
+    except:
+        pass
+    
+    user_id = query.from_user.id
+    ref_link = generate_referral_link(user_id)
+    text = f"👥 **Реферальная система**\n\n🔗 **Ваша ссылка:**\n`{ref_link}`"
+    keyboard = [[InlineKeyboardButton("◀ НАЗАД", callback_data="back_to_main")]]
+    
+    context.bot.send_message(
+        chat_id=user_id,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+def profile_menu(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    try:
+        query.message.delete()
+    except:
+        pass
+    
+    user_id = query.from_user.id
+    user = get_user(user_id)
+    username = query.from_user.username or f"id{user_id}"
+    text = f"👤 **Профиль**\n\n🔹 **Username:** @{username}\n🔹 **Баланс:** {user['balance']}₽\n🔹 **Рефералов:** {len(user['referrals'])}"
+    keyboard = [[InlineKeyboardButton("◀ НАЗАД", callback_data="back_to_main")]]
+    
+    context.bot.send_message(
+        chat_id=user_id,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+def add_sopr(update: Update, context: CallbackContext):
+    if update.effective_user.id not in OWNER_IDS:
+        update.message.reply_text("⛔ Нет прав")
+        return
+    args = context.args
+    if len(args) < 2:
+        update.message.reply_text("Использование: /sopr название цена")
+        return
+    item_id = str(db.next_id)
+    db.next_id += 1
+    db.sopr_items[item_id] = {"name": args[0], "price": args[1]}
+    db.save()
+    update.message.reply_text(f"✅ Добавлено! ID: {item_id}")
+
+def add_thing(update: Update, context: CallbackContext):
+    if update.effective_user.id not in OWNER_IDS:
+        update.message.reply_text("⛔ Нет прав")
+        return
+    args = context.args
+    if len(args) < 2:
+        update.message.reply_text("Использование: /things название цена")
+        return
+    item_id = str(db.next_id)
+    db.next_id += 1
+    db.things_items[item_id] = {"name": args[0], "price": args[1]}
+    db.save()
+    update.message.reply_text(f"✅ Добавлено! ID: {item_id}")
+
+def piar_command(update: Update, context: CallbackContext):
+    if update.effective_user.id not in OWNER_IDS:
+        update.message.reply_text("⛔ Нет прав")
+        return
+    args = context.args
+    if not args:
+        update.message.reply_text("Использование: /piar ссылка [дни] [часы] [минуты]")
+        return
+
+    link = args[0]
+    chat_id = None
+    if "t.me/" in link:
+        username = link.split("t.me/")[-1].split('/')[0].split('?')[0]
+        try:
+            chat = context.bot.get_chat(f"@{username}")
+            chat_id = chat.id
+        except:
+            update.message.reply_text(f"❌ Не удалось найти канал {username}")
+            return
+    else:
+        update.message.reply_text("❌ Неверная ссылка. Пример: https://t.me/durov")
+        return
+
+    until = None
+    if len(args) >= 2:
+        days = int(args[1]) if len(args) > 1 else 0
+        hours = int(args[2]) if len(args) > 2 else 0
+        minutes = int(args[3]) if len(args) > 3 else 0
+        if days > 0 or hours > 0 or minutes > 0:
+            until = datetime.now(MSK_TZ) + timedelta(days=days, hours=hours, minutes=minutes)
+
+    db.pending_subscriptions[str(chat_id)] = {"until": until, "link": link}
+    db.save()
+    
+    time_str = "навсегда" if until is None else f"до {until.strftime('%Y-%m-%d %H:%M')} МСК"
+    update.message.reply_text(f"✅ Обязательная подписка на {link} установлена {time_str}!")
+
+def back_to_main(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    try:
+        query.message.delete()
+    except:
+        pass
+    
+    user_id = query.from_user.id
+    photo = download_image_sync(PRIVATE_PHOTO_URL)
+    keyboard = [
+        [InlineKeyboardButton("🛍 МЕТРО ШОП", url=CHANNEL_LINK)],
+        [InlineKeyboardButton("👥 СОПРОВОЖДЕНИЯ", callback_data="sopr_menu")],
+        [InlineKeyboardButton("👕 ВЕЩИ", callback_data="things_menu")],
+        [InlineKeyboardButton("👥 РЕФЕРАЛЫ", callback_data="referral_menu")],
+        [InlineKeyboardButton("👤 ПРОФИЛЬ", callback_data="profile_menu")],
+        [InlineKeyboardButton("💬 МЕНЕДЖЕР", url=MANAGER_LINK)]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if photo:
+        context.bot.send_photo(chat_id=user_id, photo=photo, caption=WELCOME_TEXT, reply_markup=reply_markup)
+    else:
+        context.bot.send_message(chat_id=user_id, text=WELCOME_TEXT, reply_markup=reply_markup)
+
+# ---------- ЗАПУСК БОТА ----------
 def main():
     logger.info("🚀 Запуск бота...")
 
-    # Проверка доступности канала (необязательно, но полезно)
+    # Проверка канала
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChat?chat_id={CHANNEL_ID}"
         response = requests.get(url).json()
         if response.get('ok'):
             logger.info(f"✅ Канал доступен: {response['result'].get('title')}")
-        else:
-            logger.warning("⚠️ Бот не в канале, но ЛС будет работать!")
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось проверить канал: {e}")
+    except:
+        pass
 
-    # Проверка пропущенных сообщений ПРИ ЗАПУСКЕ
+    # Проверка пропущенных сообщений
     now = datetime.now(MSK_TZ)
-    today = now.date()
-
-    # Утренняя проверка (если сейчас >= 10:00 и утреннее ещё не отправляли сегодня)
-    if now.hour >= 10:
-        # Запускаем отправку в отдельном потоке, чтобы не задерживать запуск бота
+    if now.hour >= 10 and now.hour < 22:
         threading.Thread(target=send_morning, args=(True,)).start()
-
-    # Вечерняя проверка (если сейчас >= 22:00 и вечернее ещё не отправляли сегодня)
-    if now.hour >= 22:
+    elif now.hour >= 22:
         threading.Thread(target=send_evening, args=(True,)).start()
 
-    # ПЛАНИРОВЩИК (для точной отправки в будущем)
-    scheduler.add_job(send_morning, CronTrigger(hour=10, minute=0, timezone=MSK_TZ))
-    scheduler.add_job(send_evening, CronTrigger(hour=22, minute=0, timezone=MSK_TZ))
-    scheduler.start()
+    # Планировщик - ЗАПУСКАЕМ ТОЛЬКО РАЗ
+    if not scheduler.running:
+        scheduler.add_job(send_morning, CronTrigger(hour=10, minute=0, timezone=MSK_TZ), id="morning_job", replace_existing=True)
+        scheduler.add_job(send_evening, CronTrigger(hour=22, minute=0, timezone=MSK_TZ), id="evening_job", replace_existing=True)
+        scheduler.start()
+        logger.info("⏰ Планировщик запущен")
 
-    # UPDATER
+    # Updater
     updater = Updater(BOT_TOKEN)
     dp = updater.dispatcher
 
-    # Обработчик команд
+    # Команды
     dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("sopr", add_sopr))
+    dp.add_handler(CommandHandler("things", add_thing))
+    dp.add_handler(CommandHandler("piar", piar_command))
+
+    # Callback-обработчики
+    dp.add_handler(CallbackQueryHandler(sopr_menu, pattern="^sopr_menu$"))
+    dp.add_handler(CallbackQueryHandler(things_menu, pattern="^things_menu$"))
+    dp.add_handler(CallbackQueryHandler(referral_menu, pattern="^referral_menu$"))
+    dp.add_handler(CallbackQueryHandler(profile_menu, pattern="^profile_menu$"))
+    dp.add_handler(CallbackQueryHandler(back_to_main, pattern="^back_to_main$"))
+    dp.add_handler(CallbackQueryHandler(check_subscription_callback, pattern="^check_sub_"))
+    dp.add_handler(CallbackQueryHandler(sopr_detail, pattern="^sopr_"))
+    dp.add_handler(CallbackQueryHandler(thing_detail, pattern="^thing_"))
+    dp.add_handler(CallbackQueryHandler(buy_item, pattern="^buy_"))
+    dp.add_handler(CallbackQueryHandler(confirm_payment, pattern="^confirm_"))
+    dp.add_handler(CallbackQueryHandler(paid, pattern="^paid_"))
+    dp.add_handler(CallbackQueryHandler(owner_confirm, pattern="^confirm_owner_"))
+    dp.add_handler(CallbackQueryHandler(owner_reject, pattern="^reject_owner_"))
 
     logger.info("✅ Бот запущен! Пиши /start в личку - работает!")
     logger.info(f"👤 Ссылка на бота: @KrastuMetroShop_bot")
